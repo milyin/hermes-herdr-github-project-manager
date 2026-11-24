@@ -19,7 +19,7 @@ Hermes displays the result or explains why the command could not proceed. The [w
 
 | Command | Behavior | Result |
 | --- | --- | --- |
-| `/project-manager check` | Verify profile settings, the Herdr workspace, GitHub identities and repository IDs, required wiki access, and host health. | Readiness and any failed checks. |
+| `/project-manager check` | Verify profile settings, the Herdr session and any bound workspace, GitHub identities and repository IDs, required wiki access, and host health. | Readiness and any failed checks. |
 | `/project-manager show` | Read the latest recorded management pass in the selected profile. | Pass timestamp, dry-run setting, and result or failure. |
 | `/project-manager versions` | Read the installed revisions and the canonical `main` revisions for the three skills. | Per-skill revision and update status, including any hold. |
 
@@ -32,13 +32,21 @@ Hermes displays the result or explains why the command could not proceed. The [w
 
 Both commands use the same manager pane and watchdog. See [dry-run behavior](WORKFLOW.md#dry-run).
 
+## Quota check
+
+| Command | Behavior | Result |
+| --- | --- | --- |
+| `/project-manager quota-check on` | Save `quota_check: true` and use pane preparation to make the Codex quota receiver ready when needed. Use the fixed pacing rule for new Codex turns. | Quota check enabled and any quota hold. |
+| `/project-manager quota-check off` | Save `quota_check: false`. New turns skip the project manager's quota check. Provider limits continue to apply. | Quota check disabled. |
+
+See [the quota pacing rule](WORKFLOW.md#quota-check).
+
 ## Startup and recovery
 
 | Command | Behavior | Result |
 | --- | --- | --- |
-| `/project-manager quota-setup` | Provision the dedicated Codex quota receiver in the verified workspace or use the verified profile binding. | Pane ID and whether quota could be evaluated. |
 | `/project-manager install-watchdog` | Enable the profile's scheduled watchdog or reuse the enabled job. Startup triggers its first run. | Job ID and enabled status. |
-| `/project-manager watchdog` | Verify the manager in the bound workspace or start it through the pane manager using the profile settings. | Manager liveness or launch status, pane ID when known, and any startup hold. |
+| `/project-manager prepare-panes` | Run the same [pane preparation](WORKFLOW.md#prepare-panes) as the scheduled watchdog. Verify the workspace and tracked panes and prepare the manager and any required quota pane. | Workspace ID, pane IDs and their status, and any blockers. |
 | `/project-manager retire-uncertain ISSUE` | With dry run off, release a worker slot after the operator inspects the saved checkout and verified Herdr layout shows the saved pane is gone. Preserve the assignment and its evidence. | Issue and retirement status. |
 
 ## Work and maintenance
