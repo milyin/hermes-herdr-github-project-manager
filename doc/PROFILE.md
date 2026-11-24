@@ -1,6 +1,6 @@
 # Hermes project-manager profile setup
 
-Use one Hermes profile for each project manager. The profile owns the Hermes model and tools, the three installed skills, the manager's configuration and runtime state, and its watchdog job. The [workflow specification](WORKFLOW.md) defines what the manager does with that setup.
+Use one Hermes profile for each project manager. The profile keeps the three installed skills, the project configuration, saved task state, and watchdog job together. The [workflow specification](WORKFLOW.md) defines what the manager does with that setup.
 
 ## Select the Hermes profile
 
@@ -11,7 +11,9 @@ hermes profile create projectmanager
 hermes -p projectmanager setup
 ```
 
-Select the model and credentials for the Hermes controller during setup. Its model is separate from the Codex model that the project manager assigns to workers. The controller needs local terminal access to the Herdr session and skill executables. Use the same profile for the controller, operator commands and cron. See [Hermes profiles](https://hermes-agent.nousresearch.com/docs/user-guide/profiles).
+The project manager runs in a Herdr pane on the same machine as its workers. It runs the installed skill commands locally to find and start worker panes.
+
+Use the same Hermes profile when starting the manager, running commands such as `check` and `preview`, and registering the scheduled watchdog. That way, each uses the same project configuration and saved state. The watchdog checks whether the manager is running and starts it when needed. See [Hermes profiles](https://hermes-agent.nousresearch.com/docs/user-guide/profiles).
 
 Resolve the profile directory from Hermes before running the standalone Python manager. Use the actual profile name in place of `projectmanager`.
 
