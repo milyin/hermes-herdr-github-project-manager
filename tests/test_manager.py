@@ -534,13 +534,13 @@ class Contract(unittest.TestCase):
     def test_recovering_advance_distinguishes_unchanged_prior_head(self):
         m=self.manager()
         project='org/project'; key=f'{project}#7'; prior='b'*40; expected='c'*40; checkout='d'*16
-        branch='hermes/fixture/1234567890123456'; ref='refs/heads/'+branch
+        branch='hermes/fixture/1234567890123456'
         cfg={'repositories':{project:{'base':'main'}},'name':'fixture'}
         with tempfile.TemporaryDirectory() as tmp, m.State(Path(tmp),'fixture') as state:
             (state.root/'work'/checkout).mkdir(parents=True)
             row=state.data['items'][key]={'project':project,'state':'uncertain','checkout':checkout,
                 'published_sha':prior,'publish_sha':expected,'publish_branch':branch,'pr':4}
-            auth=Mock(); auth.git.return_value=f'{prior}\t{ref}\n'
+            auth=Mock(); auth.publication_ref_head.return_value=prior
             def lookup(_,__,head,**kwargs):
                 if head!=prior: raise m.Blocked('pr-actor-or-head-mismatch')
                 self.assertTrue(kwargs['require_open'])
@@ -555,6 +555,214 @@ class Contract(unittest.TestCase):
                 bundle.assert_called_once()
                 auth.push_pr.assert_not_called()
                 self.assertEqual(row['published_sha'],prior)
+
+    def test_abandon_publication_requires_distinct_exact_signature_and_preserves_evidence(self):
+        m=self.manager()
+        for advancing in (False,True):
+            with self.subTest(advancing=advancing),self.direct_command_profile() as (root,cfg,_,_):
+                project=cfg['updates'][m.SELF]; key=f'{project}#7'
+                head='c'*40; prior='d'*40 if advancing else None; number=4 if advancing else None
+                branch=f'hermes/{cfg["name"]}/'+('b'*16)
+                row={'project':project,'state':'uncertain','checkout':'b'*16,'publish_sha':head,
+                     'publish_branch':branch,'issue_binding':{'source_repo_id':10,'target_repo_id':10,'issue_id':7},
+                     'thread':'thread','turn':'turn','report':'keep.done',
+                     'pending_approval':{'message':'old-request','signature':'old-signature'}}
+                if advancing:
+                    row.update(published_sha=prior,pr=number,pr_branch=branch,pr_base='main')
+                with m.State(root,cfg['name']) as state:
+                    state.data['items'][key]=row
+                    state.save()
+                signing=root/'fixture-key'
+                m.call(['/usr/bin/ssh-keygen','-q','-t','ed25519','-N','','-f',str(signing)])
+                public_key=' '.join(signing.with_suffix('.pub').read_text().split()[:2])
+                request=root/'request'; signature=root/'signature'
+                auth=Mock(); auth.publication_ref_head.return_value=prior
+                auth.canonical_repo.return_value={'private':False,'visibility':'public'}
+                auth.existing_pr.return_value=number
+                def sign(message):
+                    request.write_text(message)
+                    signature.write_text(m.call(['/usr/bin/ssh-keygen','-Y','sign','-f',str(signing),
+                                                '-n',m.APPROVAL_NAMESPACE],data=message))
+                with (patch.object(m,'identity',return_value=auth),patch.object(m,'bound_issue'),
+                      patch.object(m,'operator_public_key',return_value=public_key),patch.object(m,'import_bundle') as bundle):
+                    args=('abandon-publication',key,'--attempted-head',head,'--approval-request',str(request),
+                          '--approval-signature',str(signature))
+                    status,reply=self.run_direct_command('publication-request',key,'--reviewed-head',head,'--abandon-attempt')
+                    self.assertEqual(status,0,reply)
+                    message=reply['result']['message']; scope=json.loads(message)['publication']
+                    auth.git.assert_not_called()
+                    self.assertEqual(auth.publication_ref_head.call_args.args,(branch,))
+                    self.assertEqual((scope['operation'],scope['remote_head'],scope['remote_pr']),
+                                     ('abandon-attempt',prior,number))
+                    sign(m.approval_message(dict(scope,operation='recover-existing-ref')))
+                    self.assertEqual(self.run_direct_command(*args),(1,{'ok':False,'error':'publication-approval-scope-changed'}))
+                    self.assertEqual(m.load_private(root/'state.json')['items'][key],row)
+                    sign(message)
+                    status,reply=self.run_direct_command(*args)
+                    self.assertEqual(status,0,reply)
+                    with m.State(root,cfg['name']) as state:
+                        stored=state.data['items'][key]
+                        self.assertEqual(stored['state'],'waiting')
+                        for f in ('checkout','thread','turn','report','issue_binding','published_sha','pr','pr_branch','pr_base'):
+                            self.assertEqual(stored.get(f),row.get(f),f)
+                        for f in ('publish_sha','publish_branch','pending_approval','push_confirmed','pr_create_attempted'):
+                            self.assertNotIn(f,stored)
+                        saved=stored['abandoned_publications'][head]
+                        self.assertEqual(saved['scope'],scope)
+                        self.assertEqual(saved['attempt_approval'],row['pending_approval'])
+                        self.assertEqual(saved['approval'],{'message':message,'signature':signature.read_text()})
+                        with self.assertRaisesRegex(m.Blocked,'publication-head-abandoned'):
+                            m.publish_item(cfg,state,key,head,lambda:None,approval={'message':message,'signature':signature.read_text()})
+                        auth.git.return_value='e'*40+'\trefs/heads/main\n'
+                        auth.pr_text.return_value=('title','body')
+                        fresh=m.publication_scope(cfg,root,key,stored,'f'*40)
+                        self.assertIn('abandonment_history',fresh)
+                        self.assertEqual(fresh['previous_head'],prior)
+                    self.assertEqual(self.run_direct_command(*args),(1,{'ok':False,'error':'no-abandonable-publication-attempt'}))
+                    bundle.assert_not_called()
+                    auth.push_pr.assert_not_called()
+                    auth.gh.assert_not_called()
+                    self.assertTrue(all(c.args[0][0]=='ls-remote' for c in auth.git.call_args_list))
+
+    def test_abandon_publication_holds_on_unverified_remote_or_guard(self):
+        m=self.manager(); project='org/project'; key=f'{project}#7'; head='a'*40; prior='c'*40
+        cfg={'name':'fixture','repositories':{project:{'base':'main'}}}
+        branch='hermes/fixture/'+'b'*16
+        for case in ('attempt present','unexpected ref','prior missing','unexpected pr','prior pr changed',
+                     'confirmed push','create attempted','late ref change','intent changed','disarmed','expired'):
+            with self.subTest(case=case),tempfile.TemporaryDirectory() as tmp,m.State(Path(tmp),'fixture') as state:
+                row=state.data['items'][key]={'project':project,'state':'publishing','checkout':'b'*16,
+                    'publish_sha':head,'publish_branch':branch,'issue_binding':{'issue_id':17},
+                    'pending_approval':{'message':'old','signature':'old'}}
+                auth=Mock(); auth.publication_ref_head.return_value=None; auth.existing_pr.return_value=None
+                if case=='attempt present': auth.publication_ref_head.return_value=head
+                if case=='unexpected ref': auth.publication_ref_head.return_value='d'*40
+                if case in ('prior missing','prior pr changed'):
+                    row.update(published_sha=prior,pr=4,pr_branch=branch,pr_base='main')
+                if case=='prior pr changed': auth.publication_ref_head.return_value=prior
+                if case in ('unexpected pr','prior pr changed'): auth.existing_pr.return_value=9
+                if case=='confirmed push': row['push_confirmed']=True
+                if case=='create attempted': row['pr_create_attempted']=True
+                if case=='late ref change':
+                    def lookup(*args,**kwargs):
+                        if auth.existing_pr.call_count==2: auth.publication_ref_head.return_value=head
+                        return None
+                    auth.existing_pr.side_effect=lookup
+
+                state.save()
+                before=m.load_private(state.path)
+                def verify(*args):
+                    if case=='intent changed': row['pending_approval']={'message':'different','signature':'different'}
+                def guard():
+                    if case=='disarmed': raise m.Blocked('direct-command-not-activated')
+                auth.canonical_repo.return_value={'visibility':'public','private':False}
+                proof={'message':m.approval_message({},now=0 if case=='expired' else None),'signature':'proof'}
+                expected={'attempt present':'remote-publication-unverified','unexpected ref':'remote-publication-unverified',
+                          'prior missing':'remote-publication-unverified','unexpected pr':'unexpected-existing-pr-inspect-before-recovery',
+                          'prior pr changed':'previous-publication-not-verified','confirmed push':'no-abandonable-publication-attempt',
+                          'create attempted':'no-abandonable-publication-attempt','late ref change':'remote-publication-unverified',
+                          'intent changed':'publication-approval-scope-changed','disarmed':'direct-command-not-activated',
+                          'expired':'publication-approval-expired'}[case]
+                with (patch.object(m,'identity',return_value=auth),patch.object(m,'bound_issue'),
+                      patch.object(m,'verify_publication_approval',side_effect=verify)):
+                    with self.assertRaisesRegex(m.Blocked,expected):
+                        m.abandon_publication(cfg,state,key,head,guard,proof)
+                self.assertEqual(m.load_private(state.path),before)
+                auth.gh.assert_not_called()
+                auth.push_pr.assert_not_called()
+
+    def test_abandonment_ref_uses_canonical_api_and_requires_exact_valid_result(self):
+        self.manager(); gh=importlib.import_module('github_io')
+        repo='org/project'; branch='hermes/fixture/'+'b'*16; ref=f'refs/heads/{branch}'; head='a'*40
+        endpoint=f'repos/{repo}/git/matching-refs/heads/{branch}'
+        record={'ref':ref,'url':f'https://api.github.com/repos/{repo}/git/refs/heads/{branch}',
+                'object':{'type':'commit','sha':head}}
+        auth=gh.Identity(repo,{'type':'gh','login':'fixture'},'fixture')
+        upper=dict(record,ref=ref+'-Mixed',url=record['url']+'-Mixed')
+        for response,expected in (([],None),([record],head),([upper],None),
+                                  ([dict(upper,url=upper['url'].removesuffix('Mixed')+'mixed')],'hold'),
+                                  ([dict(record,ref=ref+'..x',url=record['url']+'..x')],'hold'),
+                                  ([dict(record,ref=ref+'/test.lock',url=record['url']+'/test.lock')],'hold'),
+                                  ([dict(record,ref=ref+'-next',url=record['url']+'-next')],None),
+                                  ([dict(record,ref=ref+'-next',url=record['url']+'-next',object=None)],'hold'),
+                                  ([dict(record,ref=ref+'-next',url=record['url'].replace('/org/','/other/')+'-next')],'hold'),
+                                  (None,'hold'),({},'hold'),([record,record],'hold'),
+                                  ([dict(record,object={'sha':'wrong'})],'hold'),
+                                  ([dict(record,url=record['url'].replace('/org/','/other/'))],'hold')):
+            with (self.subTest(response=response),patch.object(auth,'gh',return_value=json.dumps(response)) as api,
+                  patch.object(auth,'git') as git):
+                if expected=='hold':
+                    with self.assertRaisesRegex(gh.Blocked,'remote-publication-unverified'):
+                        auth.publication_ref_head(branch)
+                else:
+                    self.assertEqual(auth.publication_ref_head(branch),expected)
+                api.assert_called_once_with(['api',endpoint])
+                git.assert_not_called()
+
+    def test_malformed_pr_list_is_not_proof_of_absence(self):
+        self.manager(); gh=importlib.import_module('github_io')
+        auth=gh.Identity('org/project',{'type':'gh','login':'fixture'},'fixture')
+        for text in ('null','{}','false','0','""','[null]'):
+            with self.subTest(text=text),patch.object(auth,'gh',return_value=text):
+                with self.assertRaisesRegex(gh.Blocked,'pr-scope-ambiguous'):
+                    auth.existing_pr('hermes/fixture/'+'b'*16,'main','a'*40)
+        with patch.object(auth,'gh',return_value='[]'):
+            self.assertIsNone(auth.existing_pr('hermes/fixture/'+'b'*16,'main','a'*40))
+
+    def test_publication_pr_lookup_rejects_late_private_metadata(self):
+        self.manager(); gh=importlib.import_module('github_io')
+        repo='org/project'; branch='hermes/fixture/'+'b'*16; head='a'*40
+        auth=gh.Identity(repo,{'type':'gh','login':'fixture'},'fixture',repo_id=7)
+        side={'repo':{'full_name':repo,'id':7}}
+        pr={'number':1,'user':{'login':'fixture'},'head':dict(side,ref=branch,sha=head),
+            'base':dict(side,ref='main'),'state':'open'}
+        for public in (False,True):
+            with (self.subTest(public=public),patch.object(auth,'gh',return_value='[{"number":1}]'),
+                  patch.object(auth,'api',return_value=pr),
+                  patch.object(auth,'canonical_repo',return_value={'private':not public,
+                      'visibility':'public' if public else 'private','default_branch':'main'})):
+                if public:
+                    self.assertEqual(auth.existing_pr(branch,'main',head,require_open=True),1)
+                else:
+                    with self.assertRaisesRegex(gh.Blocked,'publication-target-audience-unverified'):
+                        auth.existing_pr(branch,'main',head,require_open=True)
+
+    def test_publication_pr_lookup_rejects_conflicting_side_audience(self):
+        self.manager(); gh=importlib.import_module('github_io')
+        repo='org/project'; branch='hermes/fixture/'+'b'*16; head='a'*40
+        auth=gh.Identity(repo,{'type':'gh','login':'fixture'},'fixture',repo_id=7)
+        public={'private':False,'visibility':'public','default_branch':'main'}
+        for side in ('head','base'):
+            for restriction in ({'private':True},{'visibility':'private'},{'visibility':'internal'},{}):
+                with self.subTest(side=side,restriction=restriction):
+                    pr={'number':1,'user':{'login':'fixture'},'state':'open',
+                        'head':{'ref':branch,'sha':head,'repo':{'full_name':repo,'id':7}},
+                        'base':{'ref':'main','repo':{'full_name':repo,'id':7}}}
+                    pr[side]['repo'].update(restriction)
+                    with (patch.object(auth,'gh',return_value='[{"number":1}]'),patch.object(auth,'api',return_value=pr),
+                          patch.object(auth,'canonical_repo',return_value=public)):
+                        if restriction:
+                            with self.assertRaisesRegex(gh.Blocked,'publication-target-audience-unverified'):
+                                auth.existing_pr(branch,'main',head,require_open=True)
+                        else:
+                            self.assertEqual(auth.existing_pr(branch,'main',head,require_open=True),1)
+
+    def test_interrupted_publication_cannot_retry_push_after_confirmed_remote_attempt(self):
+        m=self.manager(); project='org/project'; key=f'{project}#7'; head='a'*40
+        cfg={'name':'fixture','repositories':{project:{'base':'main'}}}
+        for receipt in ('push_confirmed','pr_create_attempted'):
+            with self.subTest(receipt=receipt),tempfile.TemporaryDirectory() as tmp,m.State(Path(tmp),'fixture') as state:
+                checkout='b'*16; branch=f'hermes/fixture/{checkout}'
+                row=state.data['items'][key]={'project':project,'state':'uncertain','checkout':checkout,
+                    'publish_sha':head,'publish_branch':branch,receipt:True}
+                state.save(); before=m.load_private(state.path)
+                auth=Mock(); auth.publication_ref_head.return_value=None
+                with (patch.object(m,'identity',return_value=auth),patch.object(m,'publication_scope'),
+                      patch.object(m,'verify_publication_approval'),patch.object(m,'import_bundle') as bundle):
+                    with self.assertRaisesRegex(m.Blocked,'publication-write-receipt-requires-reconciliation'):
+                        m.publish_item(cfg,state,key,head,lambda:None,approval={'message':'x','signature':'y'})
+                bundle.assert_not_called(); auth.push_pr.assert_not_called()
+                self.assertEqual(m.load_private(state.path),before)
 
     def test_replaced_repository_cannot_reconcile_saved_pull_request(self):
         m=self.manager()
@@ -574,14 +782,14 @@ class Contract(unittest.TestCase):
     def test_verified_push_can_resume_pr_creation_without_worker_checkout(self):
         m=self.manager()
         project='org/project'; key=f'{project}#7'; branch='hermes/fixture/'+'b'*16
-        head='a'*40; base='c'*40; ref=f'refs/heads/{branch}'
+        head='a'*40; base='c'*40
         cfg={'name':'fixture','repositories':{project:{'base':'main'}}}
         proof={'message':'x','signature':'y'}
         with tempfile.TemporaryDirectory() as tmp,m.State(Path(tmp),'fixture') as state:
             row=state.data['items'][key]={'project':project,'state':'uncertain','checkout':'d'*16,
                                          'publish_branch':branch,'publish_sha':head,'pending_approval':proof}
             auth=Mock()
-            auth.git.return_value=f'{head}\t{ref}'
+            auth.publication_ref_head.return_value=head
             auth.existing_pr.return_value=None
             auth.push_pr.return_value=4
             with (patch.object(m,'identity',return_value=auth),
@@ -605,17 +813,44 @@ class Contract(unittest.TestCase):
             row=state.data['items'][key]={'project':project,'state':'uncertain','checkout':'c'*16,
                  'publish_branch':branch,'publish_sha':head,'push_confirmed':True,
                  'pending_approval':{'message':'old','signature':'old'}}
-            auth=Mock(); auth.git.return_value=f'{head}\trefs/heads/{branch}'; auth.existing_pr.return_value=17
+            auth=Mock(); auth.existing_pr.return_value=17
+            auth.publication_ref_head.return_value=head
             scope={'base_sha':'d'*40,'recovery_pr':17,'title':'Example','body':'Review this.'}
             with (patch.object(m,'identity',return_value=auth),
                   patch.object(m,'publication_scope',return_value=scope),patch.object(m,'verify_publication_approval')):
                 with self.assertRaisesRegex(m.Blocked,'recovery-approval-required'):
                     m.publish_item(cfg,state,key,head,lambda:None)
                 self.assertNotIn('pr',row)
-                proof={'message':'new','signature':'new'}
+                proof={'message':m.approval_message(scope),'signature':'new'}
                 self.assertEqual(m.publish_item(cfg,state,key,head,lambda:None,approval=proof,recover=True)['pr'],17)
             self.assertEqual(row['publication_approval_sha256'],m.hashlib.sha256(b'new').hexdigest())
             auth.push_pr.assert_not_called()
+
+    def test_resume_rechecks_publication_after_final_signed_scope_reads(self):
+        m=self.manager(); project='org/project'; key=f'{project}#7'; head='a'*40
+        cfg={'name':'fixture','repositories':{project:{'base':'main'}}}
+        branch='hermes/fixture/'+'b'*16
+        for drift in ('branch','pr','none'):
+            with self.subTest(drift=drift),tempfile.TemporaryDirectory() as tmp,m.State(Path(tmp),'fixture') as state:
+                proof={'message':m.approval_message({}),'signature':'fixture'}
+                row=state.data['items'][key]={'project':project,'state':'uncertain','checkout':'b'*16,
+                    'publish_sha':head,'publish_branch':branch,'push_confirmed':True,'pr_create_attempted':True}
+                state.save(); before=m.load_private(state.path)
+                auth=Mock()
+                auth.publication_ref_head.return_value=head; auth.existing_pr.return_value=4
+                def verify(*args):
+                    if verifier.call_count>1 and drift=='branch': auth.publication_ref_head.return_value=None
+                    if verifier.call_count>1 and drift=='pr': auth.existing_pr.return_value=None
+                with (patch.object(m,'identity',return_value=auth),patch.object(m,'publication_scope',return_value={}),
+                      patch.object(m,'verify_publication_approval',side_effect=verify) as verifier):
+                    if drift=='none':
+                        self.assertEqual(m.publish_item(cfg,state,key,head,lambda:None,approval=proof)['pr'],4)
+                        self.assertEqual(m.load_private(state.path)['items'][key]['published_sha'],head)
+                    else:
+                        with self.assertRaisesRegex(m.Blocked,'remote-publication-unverified'):
+                            m.publish_item(cfg,state,key,head,lambda:None,approval=proof)
+                        self.assertEqual(m.load_private(state.path),before)
+                auth.push_pr.assert_not_called()
 
     def test_advance_requires_the_signed_pr_number(self):
         self.manager()
@@ -684,6 +919,27 @@ class Contract(unittest.TestCase):
                 pages={c.args[2]:c.args[3] for c in write.call_args_list}
                 self.assertIn(key,pages['Manager-fixture.md'])
                 self.assertNotIn(key,pages['Manager-fixture-Log.md'])
+
+    def test_abandoned_publication_receipts_are_not_published_in_wiki(self):
+        m=self.manager(); project='org/project'; key=f'{project}#7'; dash='org/console'
+        cfg={'name':'fixture','publication':{'signature':'hermes/fixture'},'dashboard':{'repo':dash,'repo_id':10},
+             'repositories':{project:{'repo_id':21,'kind':'owned'}}}
+        metadata={repo:{'id':id_,'has_wiki':True,'private':False,'visibility':'public'}
+                  for repo,id_ in ((project,21),(dash,10))}
+        with tempfile.TemporaryDirectory() as tmp,m.State(Path(tmp),'fixture') as state:
+            state.data['items'][key]={'project':project,'state':'waiting',
+                'issue_binding':{'source_repo_id':21,'target_repo_id':21,'issue_id':29},
+                'abandoned_publications':{'a'*40:{'approval':{'signature':'private-fixture-proof'}}}}
+            state.event('turn-completed',key)
+            state.event('publication-attempt-abandoned',key)
+            with (patch.object(m,'identity'),patch.object(m,'verify_saved_issue'),
+                  patch.object(m,'publish_wiki',return_value={'status':'published'}) as write):
+                m.wiki_pages(cfg,state,state.data['items'],[],[],[],metadata,lambda:None)
+                self.assertEqual(len(write.call_args_list),3)
+                log=next(c.args[3] for c in write.call_args_list if c.args[2]=='Manager-fixture-Log.md')
+                self.assertIn('turn-completed',log)
+                self.assertNotIn('publication-attempt-abandoned',log)
+                self.assertTrue(all('private-fixture-proof' not in c.args[3] for c in write.call_args_list))
 
     def test_wiki_rechecks_route_of_queued_issue_before_push(self):
         m=self.manager(); project='org/project'; key=f'{project}#7'; dash='org/console'
@@ -855,6 +1111,7 @@ class Contract(unittest.TestCase):
         commands = {
             'follow_up':('follow-up','org/repo#1'),
             'publish_item':('publish','org/repo#1','--reviewed-head','a'*40),
+            'abandon_publication':('abandon-publication','org/repo#1','--attempted-head','a'*40),
             'gap':('capability-gap',m.SELF,'fixture-gap'),
         }
         cases = ('armed preview','preview launch with apply heartbeat','disarmed','restart hold','update journal','stale heartbeat',
@@ -866,6 +1123,10 @@ class Contract(unittest.TestCase):
                       self.direct_command_profile(running=case!='stopped controller') as (root,_,mark,hb),
                       patch.object(m,name,return_value={'reached':True}) as handler):
                     argv = args
+                    if name=='abandon_publication':
+                        request,signature=root/'request.fixture',root/'signature.fixture'
+                        request.write_text('fixture request'); signature.write_text('fixture signature')
+                        argv=(*args,'--approval-request',str(request),'--approval-signature',str(signature))
                     if case=='armed preview':
                         mark['apply'],hb['mode'] = False,'preview'
                     elif case=='preview launch with apply heartbeat':
@@ -892,7 +1153,7 @@ class Contract(unittest.TestCase):
                     elif case=='different config path':
                         config = root/'alternate.yaml'
                         config.write_bytes((root/'config.yaml').read_bytes())
-                        argv = ('--config',str(config),*args)
+                        argv = ('--config',str(config),*argv)
                     m.save_private(root/'manager-launch.json',mark)
                     m.save_private(root/'heartbeat.json',hb)
                     state_lock = m.lock(root,'pass.lock') if case=='busy state' else nullcontext()
@@ -964,7 +1225,8 @@ class Contract(unittest.TestCase):
 
     def test_publish_rechecks_at_each_github_write(self):
         m = self.manager()
-        for phase in ('bundle','push','push journal','push expiry','no-op','pr create','pr ref','pr journal','pr expiry','foreign pr','permitted'):
+        for phase in ('bundle','push','push journal','push expiry','no-op','push readback','pr create','pr ref',
+                      'pr journal','pr expiry','foreign pr','after create drift','permitted'):
             with self.subTest(phase=phase), self.direct_command_profile() as (root,cfg,_,_):
                 gh = importlib.import_module('github_io')
                 project = cfg['updates'][m.SELF]
@@ -989,6 +1251,7 @@ class Contract(unittest.TestCase):
                             return f'{base}\t{ref}'
                         if 'push' in writes:
                             pushed_head_reads.append(ref)
+                            if phase=='push readback': return ''
                             if len(pushed_head_reads)==2: disarm_at('pr ref')
                         return f'{expected}\t{ref}' if 'push' in writes else ''
                     if args[2]=='push':
@@ -1038,26 +1301,60 @@ class Contract(unittest.TestCase):
                       patch.object(auth,'check_pr_target') as target, patch.object(auth,'verify') as verify,
                       patch.object(auth,'existing_pr',side_effect=existing),patch.object(m.State,'event',journal),
                       patch.object(m,'time',fake_time),patch.object(m,'direct_command_guard',side_effect=guard_factory),
-                      patch.object(auth,'git',side_effect=git), patch.object(auth,'gh',side_effect=github)):
+                      patch.object(auth,'git',side_effect=git), patch.object(auth,'gh',side_effect=github),
+                      patch.object(auth,'publication_ref_head',return_value=None if phase=='after create drift' else expected)):
                     target.side_effect = lambda *a: disarm_at('push') if target.call_count==2 else None
                     verify.side_effect = lambda: disarm_at('pr create') if verify.call_count==2 else None
                     code,result = self.run_direct_command('publish',key,'--reviewed-head',expected,
                                                           '--approval-request',str(request),'--approval-signature',str(signature))
                 self.assertEqual((code,result['ok']), (0,True) if phase=='permitted' else (1,False))
-                expected_writes = {'bundle':[],'push':[],'push journal':[],'push expiry':[],'no-op':['push'],'pr create':['push'],
+                expected_writes = {'bundle':[],'push':[],'push journal':[],'push expiry':[],'no-op':['push'],
+                                   'push readback':['push'],'pr create':['push'],
                                    'pr ref':['push'],'pr journal':['push'],'pr expiry':['push'],
-                                   'foreign pr':['push'],'permitted':['push','pr create']}
+                                   'foreign pr':['push'],'after create drift':['push','pr create'],'permitted':['push','pr create']}
                 self.assertEqual(writes,expected_writes[phase])
-                if phase in ('no-op','pr ref'):
+                if phase=='after create drift':
+                    row=m.load_private(root/'state.json')['items'][key]
+                    self.assertEqual((row['state'],row['push_confirmed'],row['pr_create_attempted']),('uncertain',True,True))
+                    self.assertNotIn('published_sha',row)
+                if phase in ('no-op','push readback','pr ref'):
                     row=m.load_private(root/'state.json')['items'][key]
                     self.assertEqual(row['state'],'uncertain')
-                    self.assertIs(row.get('push_confirmed') is True,phase=='pr ref')
+                    self.assertIs(row.get('push_confirmed') is True,phase!='no-op')
                 if phase in ('push journal','push expiry','pr journal','pr expiry','foreign pr'):
                     row=m.load_private(root/'state.json')['items'][key]
                     self.assertNotIn('pr_create_attempted',row)
                     if phase in ('push journal','push expiry'):
                         self.assertEqual(row['state'],'waiting')
                         self.assertNotIn('publish_sha',row)
+
+    def test_last_target_read_refuses_an_audience_change_before_each_write(self):
+        self.manager()
+        gh=importlib.import_module('github_io')
+        project='org/project'; branch='hermes/fixture/'+'b'*16; head='a'*40
+        for changed_on in (2,3):
+            with self.subTest(changed_on=changed_on):
+                auth=gh.Identity(project,{'type':'gh','login':'fixture'},'hermes/fixture')
+                public={'private':False,'visibility':'public','default_branch':'main'}
+                restricted=dict(public,private=True,visibility='private')
+                reads=[public]*(changed_on-1)+[restricted]*(4-changed_on)
+                writes=[]
+                def git(args,**kwargs):
+                    if args[0]=='ls-remote':
+                        return f'{head}\t{args[-1]}' if writes else ''
+                    self.assertIn('push',args)
+                    writes.append('push')
+                    return f'*\t{args[-1]}\t[new branch]\n'
+                def record(): return lambda:None
+                with (patch.object(auth,'canonical_repo',side_effect=reads),patch.object(auth,'verify'),
+                      patch.object(auth,'existing_pr',return_value=None),patch.object(auth,'git',side_effect=git),
+                      patch.object(auth,'gh') as api):
+                    with self.assertRaisesRegex(gh.Blocked,'publication-target-audience-unverified'):
+                        auth.push_pr(Path('/fixture'),branch,'main',f'{project}#1',head,
+                                     before_write=lambda:None,final_guard=lambda:None,resume=False,
+                                     before_push=record,after_push=lambda:None,before_create=record)
+                    api.assert_not_called()
+                self.assertEqual(writes,[] if changed_on==2 else ['push'])
 
     def test_capability_gap_rechecks_after_preflight_for_label_and_issue(self):
         m = self.manager()

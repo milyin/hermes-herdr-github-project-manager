@@ -1022,9 +1022,79 @@ def publication_branch(cfg,row):
     return branch
 
 
+def publication_history(row,head):
+    history=row.get('abandoned_publications',{})
+    require(isinstance(history,dict),'publication-history-unverified')
+    require(head not in history,'publication-head-abandoned')
+    return history
+
+
+def publication_digest(value):
+    return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':'),
+                                     ensure_ascii=True,allow_nan=False).encode()).hexdigest()
+
+
+def abandonment_scope(cfg,root,key,row,expected):
+    project=row.get('project')
+    require(ITEM.fullmatch(key) and SHA.fullmatch(expected) and project in cfg['repositories'],
+            'invalid-publication-scope')
+    require(row.get('state') in ('uncertain','publishing') and row.get('publish_sha')==expected and
+            row.get('push_confirmed',False) is False and row.get('pr_create_attempted',False) is False,
+            'no-abandonable-publication-attempt')
+    history=publication_history(row,expected)
+    branch=publication_branch(cfg,row)
+    require(row.get('publish_branch')==branch,'ambiguous-publication-missing-branch-receipt')
+    pending=row.get('pending_approval')
+    require(isinstance(pending,dict) and set(pending)=={'message','signature'} and
+            all(isinstance(v,str) and v for v in pending.values()),'publication-attempt-receipt-unverified')
+    bound_issue(cfg,key,row)
+    base=cfg['repositories'][project]['base']
+    prior,pr=row.get('published_sha'),row.get('pr')
+    if prior is None:
+        require(pr is None and row.get('pr_branch') is None and row.get('pr_base') is None,
+                'previous-publication-not-verified')
+    else:
+        require(isinstance(prior,str) and SHA.fullmatch(prior) and prior!=expected and
+                type(pr) is int and pr>0 and row.get('pr_base')==base and row.get('pr_branch')==branch,
+                'previous-publication-not-verified')
+    auth=identity(cfg,project)
+    require(audience(auth.canonical_repo())=='public','publication-target-audience-unverified')
+    require(auth.publication_ref_head(branch)==prior,'remote-publication-unverified')
+    observed=auth.existing_pr(branch,base,prior or expected,require_open=prior is not None)
+    if prior is None:
+        require(observed is None,'unexpected-existing-pr-inspect-before-recovery')
+    else:
+        require(type(observed) is int and observed==pr,'previous-publication-not-verified')
+    require(auth.publication_ref_head(branch)==prior,'remote-publication-unverified')
+    require(audience(auth.canonical_repo())=='public','publication-target-audience-unverified')
+    return {'operation':'abandon-attempt','issue':key,'target':project,'base':base,'branch':branch,
+            'head':expected,'binding':dict(row['issue_binding']),'remote_head':prior,'remote_pr':observed,
+            'pending_approval_sha256':publication_digest(pending),'abandonment_history':publication_digest(history),
+            'configuration':config_digest(cfg),'profile':hashlib.sha256(os.fsencode(root)).hexdigest()}
+
+
+def abandon_publication(cfg,state,key,expected,guard,approval):
+    row=state.data['items'].get(key,{})
+    scope=abandonment_scope(cfg,state.root,key,row,expected)
+    verify_publication_approval(state.root,scope,approval)
+    require(abandonment_scope(cfg,state.root,key,row,expected)==scope,'publication-approval-scope-changed')
+    guard()
+    issued=epoch(obj(approval['message']).get('issued_at'))
+    require(0<=time.time()-issued<APPROVAL_LIFETIME,'publication-approval-expired')
+    history=publication_history(row,expected)
+    row['abandoned_publications']={**history,expected:{'scope':scope,'at':stamp(),
+        'attempt_approval':row['pending_approval'],'approval':approval}}
+    for field in ('publish_sha','publish_branch','pending_approval','push_confirmed','pr_create_attempted'):
+        row.pop(field,None)
+    row['state']='waiting'
+    state.event('publication-attempt-abandoned',key)
+    return {'issue':key,'head':expected,'status':'abandoned','remote_modified':False}
+
+
 def publication_scope(cfg,root,key,row,expected,*,recover=False):
     require(ITEM.fullmatch(key) and SHA.fullmatch(expected) and row.get('project') in cfg['repositories'],
             'invalid-publication-scope')
+    history=publication_history(row,expected)
     source=key.split('#',1)[0]; target=row['project']
     bound_issue(cfg,key,row)
     auth=identity(cfg,target)
@@ -1042,12 +1112,12 @@ def publication_scope(cfg,root,key,row,expected,*,recover=False):
             'branch':branch,'title':title,'body':body,
             'previous_head':row.get('published_sha'),'previous_pr':row.get('pr'),
             'configuration':config_digest(cfg),'profile':hashlib.sha256(os.fsencode(root)).hexdigest()}
+    if history:
+        scope['abandonment_history']=publication_digest(history)
     if recover:
         require(row.get('state') in ('publishing','uncertain') and row.get('publish_sha')==expected
                 and row.get('publish_branch')==branch,'no-recoverable-publication-intent')
-        ref=f'refs/heads/{branch}'
-        require(auth.git(['ls-remote',f'https://github.com/{target}.git',ref]).splitlines()==[f'{expected}\t{ref}'],
-                'remote-publication-unverified')
+        require(auth.publication_ref_head(branch)==expected,'remote-publication-unverified')
         scope.update(operation='recover-existing-ref',recovery_pr=auth.existing_pr(branch,base,expected,require_open=True,
                      expected_text=(title,body) if row.get('published_sha') is None else None))
     return scope
@@ -1057,6 +1127,7 @@ def publish_item(cfg,state,key,expected,guard,*,approval=None,recover=False):
     require(ITEM.fullmatch(key) and SHA.fullmatch(expected),'invalid-issue-or-approved-head')
     row=state.data['items'].get(key,{})
     require(row.get('state') in ('waiting','uncertain','publishing') and row.get('checkout') and row.get('project') in cfg['repositories'],'no-reviewed-candidate-scope')
+    publication_history(row,expected)
     project=row['project']
     interrupted=row.get('state') in ('uncertain','publishing')
     require(not recover or (approval is not None and interrupted),'recovery-approval-required')
@@ -1084,9 +1155,8 @@ def publish_item(cfg,state,key,expected,guard,*,approval=None,recover=False):
         require(0<=time.time()-issued<APPROVAL_LIFETIME,'publication-approval-expired')
         guard()
         require(0<=time.time()-issued<APPROVAL_LIFETIME,'publication-approval-expired')
-    def journal_attempt(event,changes,clear=()):
+    def journal_attempt(event,changes):
         before=dict(row)
-        for field in clear: row.pop(field,None)
         row.update(changes,pending_approval=approval)
         state.event(event,key)
         def abort():
@@ -1098,10 +1168,9 @@ def publish_item(cfg,state,key,expected,guard,*,approval=None,recover=False):
     def journal_create():
         return journal_attempt('pr-creation-started',{'pr_create_attempted':True})
     if interrupted:
-        head_ref=f'refs/heads/{branch}'
-        remote_lines=git.git(['ls-remote',remote,head_ref]).splitlines()
+        remote_head=git.publication_ref_head(branch)
         prior=row.get('published_sha')
-        if remote_lines==[f'{expected}\t{head_ref}']:
+        if remote_head==expected:
             require(row.get('push_confirmed') is True or recover,'recovery-approval-required')
             existing=git.existing_pr(branch,base,expected,require_open=True)
             require(not recover or existing==authorization['recovery_pr'],'publication-approval-scope-changed')
@@ -1109,21 +1178,23 @@ def publish_item(cfg,state,key,expected,guard,*,approval=None,recover=False):
                     'previous-publication-not-verified')
             if existing is not None:
                 require(prior is not None or row.get('pr_create_attempted') is True or recover,'recovery-approval-required')
-                if prior is None:
-                    require(git.existing_pr(branch,base,expected,require_open=True,
-                            expected_text=git.pr_text(key,expected))==existing,'remote-publication-unverified')
-                require(git.git(['ls-remote',remote,head_ref]).splitlines()==remote_lines,'remote-publication-unverified')
                 before_write()
+                text=git.pr_text(key,expected) if prior is None else None
+                require(git.existing_pr(branch,base,expected,require_open=True,expected_text=text)==existing and
+                        git.publication_ref_head(branch)==expected,'remote-publication-unverified')
+                final_guard()
                 return published(state,row,key,project,existing,expected,base,branch,approval)
             # The exact ref is already published. Do not push if it moves.
             pr=git.push_pr(None,branch,base,key,expected,before_write=before_write,resume=True,
                            before_create=journal_create,final_guard=final_guard)
             return published(state,row,key,project,pr,expected,base,branch,approval)
-        elif prior is not None and SHA.fullmatch(prior) and remote_lines==[f'{prior}\t{head_ref}']:
+        require(row.get('push_confirmed',False) is False and row.get('pr_create_attempted',False) is False,
+                'publication-write-receipt-requires-reconciliation')
+        if isinstance(prior,str) and SHA.fullmatch(prior) and remote_head==prior:
             existing=git.existing_pr(branch,base,prior,require_open=True)
             require(type(existing) is int and existing==row.get('pr'),'previous-publication-not-verified')
         else:
-            require(prior is None and not remote_lines,'remote-publication-unverified')
+            require(prior is None and remote_head is None,'remote-publication-unverified')
     require(not recover,'remote-publication-unverified')
     c=state.root/'work'/row['checkout']
     require(c.is_dir() and c.resolve()==c and re.fullmatch(r'[a-f0-9]{16}',c.name),'unsafe-candidate-worktree')
@@ -1140,8 +1211,7 @@ def publish_item(cfg,state,key,expected,guard,*,approval=None,recover=False):
         require(git.git(['ls-remote',remote,ref]).splitlines()==[f'{base_sha}\t{ref}'],'target-base-changed')
         before_write()
         def journal_push():
-            return journal_attempt('publication-started',{'state':'publishing','publish_sha':expected,'publish_branch':branch},
-                                   ('push_confirmed','pr_create_attempted'))
+            return journal_attempt('publication-started',{'state':'publishing','publish_sha':expected,'publish_branch':branch})
         def confirmed_push():
             row['push_confirmed']=True
             state.save()
@@ -1252,6 +1322,7 @@ def wiki_pages(cfg,state,visible,tabs,blocks,updates,metadata,guard):
             if dest==dash:
                 events=['# Manager operation log','']
                 for e in state.data['events']:
+                    if e['kind']=='publication-attempt-abandoned': continue
                     if e['item'] is None or (e['item'] in allowed and e.get('issue_binding')==allowed[e['item']]['issue_binding']):
                         events.append(f"- {e['at']} · {e['kind']}"+(f" · {link(e['item'])}" if e['item'] else ''))
                 writes[dest]['log']=publish_wiki(gh.git,wiki_url(dest),f'Manager-{name}-Log.md',
@@ -1750,7 +1821,11 @@ def main():
     s=sub.add_parser('publish',allow_abbrev=False); s.add_argument('issue'); s.add_argument('--reviewed-head',required=True)
     s.add_argument('--approval-request',type=Path); s.add_argument('--approval-signature',type=Path); s.add_argument('--recover-existing-ref',action='store_true')
     s=sub.add_parser('publication-request',allow_abbrev=False); s.add_argument('issue'); s.add_argument('--reviewed-head',required=True)
-    s.add_argument('--recover-existing-ref',action='store_true')
+    recovery=s.add_mutually_exclusive_group()
+    recovery.add_argument('--recover-existing-ref',action='store_true')
+    recovery.add_argument('--abandon-attempt',action='store_true')
+    s=sub.add_parser('abandon-publication',allow_abbrev=False); s.add_argument('issue'); s.add_argument('--attempted-head',required=True)
+    s.add_argument('--approval-request',type=Path,required=True); s.add_argument('--approval-signature',type=Path,required=True)
     s=sub.add_parser('record-review',allow_abbrev=False); s.add_argument('issue'); s.add_argument('--head',required=True); s.add_argument('--review-id',type=int,required=True)
     s=sub.add_parser('sync',allow_abbrev=False); s.add_argument('skill',choices=(SELF,AGENT,PANE)); s.add_argument('--approved-head',required=True)
     s=sub.add_parser('capability-gap',allow_abbrev=False); s.add_argument('skill',choices=(SELF,AGENT,PANE)); s.add_argument('gap')
@@ -1762,7 +1837,7 @@ def main():
         if a.op=='serve':
             require(a.profile_home.is_absolute() and (a.profile_home/'config.yaml').is_file(),'invalid-supervisor-profile')
             os.environ['HERMES_HOME']=str(a.profile_home.resolve())
-        direct=a.op in ('capability-gap','publish','follow-up')
+        direct=a.op in ('capability-gap','publish','abandon-publication','follow-up')
         root=private(home()/'github-project-manager',create=not direct and a.op!='publication-request')
         config=(a.config or root/'config.yaml').absolute()
         require(config.parent==root and trusted_path(config.parent,directory=True),'config-must-be-in-private-manager-directory')
@@ -1784,9 +1859,10 @@ def main():
         elif a.op=='publication-request':
             data=load_private(root/'state.json')
             require(data.get('schema')==1 and data.get('name')==cfg['name'],'different-manager-already-bound-to-profile')
-            result={'message':approval_message(publication_scope(cfg,root,a.issue,data['items'].get(a.issue,{}),a.reviewed_head,
-                                                                 recover=a.recover_existing_ref)),
-                    'namespace':APPROVAL_NAMESPACE}
+            row=data['items'].get(a.issue,{})
+            scope=(abandonment_scope(cfg,root,a.issue,row,a.reviewed_head) if a.abandon_attempt else
+                   publication_scope(cfg,root,a.issue,row,a.reviewed_head,recover=a.recover_existing_ref))
+            result={'message':approval_message(scope),'namespace':APPROVAL_NAMESPACE}
         else:
             guard=direct_command_guard(cfg,root,config) if direct else None
             with State(root,cfg['name'],guard=guard) as state:
@@ -1799,6 +1875,9 @@ def main():
                     proof=({'message':read_bounded(a.approval_request),'signature':read_bounded(a.approval_signature)}
                            if a.approval_request is not None else None)
                     result=publish_item(cfg,state,a.issue,a.reviewed_head,guard,approval=proof,recover=a.recover_existing_ref)
+                elif a.op=='abandon-publication':
+                    proof={'message':read_bounded(a.approval_request),'signature':read_bounded(a.approval_signature)}
+                    result=abandon_publication(cfg,state,a.issue,a.attempted_head,guard,proof)
                 elif a.op=='record-review': result=owner_review(cfg,state,a.issue,a.head,a.review_id)
                 elif a.op=='follow-up': result=follow_up(cfg,state,a.issue,sys.stdin.buffer.read(24001).decode('utf-8'),guard)
                 elif a.op=='retire-uncertain': result=retire_uncertain(cfg,state,a.issue)
