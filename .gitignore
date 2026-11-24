@@ -1,0 +1,6 @@
+/config.yaml
+/state.json
+/preview.json
+/.venv/
+__pycache__/
+*.py[cod]

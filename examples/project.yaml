@@ -1,0 +1,68 @@
+# Copy to the active Hermes profile's github-project-manager/config.yaml.
+# Choose a public-safe unique name; omit it to derive a stable host-based alias.
+name: example-manager
+herdr:
+  instance: default
+  # Set to the exact workspace ID of a dedicated manager workspace.
+  workspace: null
+worker:
+  agent: codex
+  model: YOUR_CODEX_MODEL
+  # Keep workers offline; the manager snapshots issue context itself.
+  network: false
+  max_active: 2
+  # Must name a private, separate quota receiver created by the agent manager.
+  quota_pane: null
+  max_steps_per_pass: 1
+schedule:
+  interval_seconds: 300
+  skill_update_interval_seconds: 1800
+health:
+  min_free_gib: 5
+  max_load_per_cpu: 1.25
+  temp_max_age_hours: 24
+publication:
+  signature: hermes/YOUR_MANAGER_MODEL
+  identities:
+    bot:
+      type: app
+      launcher: /absolute/path/to/approved-github-app-launcher
+      login: 'example-manager[bot]'
+dashboard:
+  repo: example-org/manager-dashboard
+  # Replace each example ID with the matching GitHub repository's numeric ID.
+  repo_id: 1001
+  identity: bot
+repositories:
+  example-org/hermes-herdr-github-project-manager:
+    repo_id: 1002
+    kind: owned
+    identity: bot
+    base: main
+    # Example only. Pin real independent reviewer account IDs and each required
+    # GitHub Actions check's workflow ID, file path and Git blob ID.
+    reviewer_ids: [2001]
+    trusted_checks:
+      tests:
+        workflow_id: 3001
+        path: .github/workflows/ci.yml
+        blob: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+  example-org/hermes-herdr-agent-manager:
+    repo_id: 1003
+    kind: owned
+    identity: bot
+    base: main
+  example-org/hermes-herdr-pane-manager:
+    repo_id: 1004
+    kind: owned
+    identity: bot
+    base: main
+  example-org/external-project:
+    repo_id: 1005
+    kind: external
+    identity: bot
+    base: develop
+updates:
+  hermes-herdr-github-project-manager: example-org/hermes-herdr-github-project-manager
+  hermes-herdr-agent-manager: example-org/hermes-herdr-agent-manager
+  hermes-herdr-pane-manager: example-org/hermes-herdr-pane-manager
