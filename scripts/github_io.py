@@ -295,9 +295,9 @@ class Identity:
                 raise Blocked('remote-branch-conflict')
             self.verify()
             before_write()
-            self.check_pr_target(branch,base)
             if prior is not None and self.existing_pr(branch,base,prior,require_open=True)!=previous_pr:
                 raise Blocked('previous-publication-not-verified')
+            self.check_pr_target(branch,base)
             if not callable(after_push):
                 raise Blocked('publication-journal-required')
             journal_attempt(before_push)
@@ -306,42 +306,78 @@ class Identity:
             if (len(updates)!=1 or len(updates[0])!=3 or
                     updates[0][:2]!=['*' if prior is None else ' ',f'{expected}:{ref}']):
                 raise Blocked('push-update-not-confirmed')
+            # Journal the reported update even if the separate ref read fails.
+            after_push()
         if self.git(['ls-remote',url,ref]).splitlines() != exact:
             raise Blocked('push-not-verified')
-        if not resume:
-            assert callable(after_push)
-            after_push()
         number = self.existing_pr(branch,base,expected,require_open=True)
         if previous_pr is not None:
             if number!=previous_pr: raise Blocked('previous-publication-not-verified')
+            if self.publication_ref_head(branch)!=expected: raise Blocked('remote-publication-unverified')
             return number
         if number is not None:
             raise Blocked('unexpected-existing-pr-inspect-before-recovery')
         self.verify()
         title,body = self.pr_text(issue,expected)
         before_write()
-        self.check_pr_target(branch,base)
         if self.git(['ls-remote',url,ref]).splitlines()!=exact:
             raise Blocked('remote-publication-unverified')
         if self.existing_pr(branch,base,expected) is not None:
             raise Blocked('unexpected-existing-pr-inspect-before-recovery')
+        self.check_pr_target(branch,base)
         journal_attempt(before_create)
         self.gh(['pr','create','-R',self.repo,'--base',base,'--head',branch,'--title',title,
                  '--body',body],timeout=60)
         number = self.existing_pr(branch,base,expected,require_open=True,expected_text=(title,body))
         if number is None: raise Blocked('pr-not-verified')
+        if self.publication_ref_head(branch)!=expected: raise Blocked('remote-publication-unverified')
         return number
+
+    def publication_ref_head(self,branch):
+        if not re.fullmatch(r'hermes/[a-z0-9][a-z0-9-]{0,39}/[a-f0-9]{16}',branch):
+            raise Blocked('invalid-publication-branch')
+        path=f'repos/{self.repo}/git/matching-refs/heads/{branch}'
+        try:
+            matches=json.loads(self.gh(['api',path]))
+        except ValueError as e:
+            raise Blocked('remote-publication-unverified') from e
+        if not isinstance(matches,list):
+            raise Blocked('remote-publication-unverified')
+        prefix=f'refs/heads/{branch}'
+        url_prefix=f'https://api.github.com/repos/{self.repo.lower()}/git/'
+        head=None
+        seen=set()
+        for row in matches:
+            ref=row.get('ref') if isinstance(row,dict) else None
+            if not isinstance(ref,str) or not ref.startswith(prefix) or ref in seen:
+                raise Blocked('remote-publication-unverified')
+            if (not re.fullmatch(r'refs/heads/[A-Za-z0-9._/-]+',ref) or '..' in ref or
+                    any(not part or part.startswith('.') or part.endswith(('.', '.lock')) for part in ref.split('/'))):
+                raise Blocked('remote-publication-unverified')
+            obj=row.get('object'); url=row.get('url')
+            if not isinstance(obj,dict):
+                raise Blocked('remote-publication-unverified')
+            sha=obj.get('sha')
+            if (not isinstance(sha,str) or not SHA.fullmatch(sha) or
+                    obj.get('type')!='commit' or not isinstance(url,str) or
+                    url[:len(url_prefix)].lower()!=url_prefix or url[len(url_prefix):]!=ref):
+                raise Blocked('remote-publication-unverified')
+            seen.add(ref)
+            if ref==prefix:
+                head=sha
+        return head
 
     def existing_pr(self,branch,base,expected,require_open=False,expected_text=None):
         text = self.gh(['pr','list','-R',self.repo,'--state','all','--head',branch,'--limit','40',
                         '--json','number,headRefOid,baseRefName,state,isCrossRepository'])
         matches = json.loads(text)
-        if not matches: return None
-        if len(matches)!=1 or type(matches[0].get('number')) is not int:
+        if matches==[]: return None
+        if (not isinstance(matches,list) or len(matches)!=1 or not isinstance(matches[0],dict) or
+                type(matches[0].get('number')) is not int or matches[0]['number']<=0):
             raise Blocked('pr-scope-ambiguous')
         number = matches[0]['number']
         record = self.api(f'repos/{self.repo}/pulls/{number}')
-        self.verify_pr_route(record,base,branch)
+        self.verify_pr_route(record,base,branch,publication=True)
         if require_open and record.get('state')!='open':
             raise Blocked('previous-pr-is-no-longer-open')
         if (record.get('number')!=number or record.get('head',{}).get('sha') != expected
@@ -353,18 +389,28 @@ class Identity:
 
     def check_pr_target(self,branch,base):
         repo=self.canonical_repo()
+        # The signed publication route is public-only. Do not ignore a newer
+        # observation that contradicts the audience in the signed request.
+        if repo.get('visibility')!='public' or repo.get('private') is not False:
+            raise Blocked('publication-target-audience-unverified')
         default=repo.get('default_branch')
         if not isinstance(default,str) or not default or branch in (default,base):
             raise Blocked('invalid-live-publication-target')
 
-    def verify_pr_route(self,p,base,branch):
-        self.canonical_repo()
+    def verify_pr_route(self,p,base,branch,*,publication=False):
+        if publication:
+            self.check_pr_target(branch,base)
+        else:
+            self.canonical_repo()
         for key,value in (('base',base),('head',branch)):
             side=p.get(key) or {}
             repo=side.get('repo') or {}
             if (side.get('ref')!=value or str(repo.get('full_name','')).lower()!=self.repo or
                     type(repo.get('id')) is not int or repo['id']!=self.repo_id):
                 raise Blocked('tracked-pr-route-changed')
+            if publication and (repo.get('private',False) is not False or repo.get('visibility','public')!='public'):
+                # Embedded records may omit visibility, but contradictory evidence is a hold.
+                raise Blocked('publication-target-audience-unverified')
 
     def pull_state(self, number, *, base=None, branch=None, required=None):
         p = self.api(f'repos/{self.repo}/pulls/{number}')
