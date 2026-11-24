@@ -13,16 +13,15 @@ Type `/project-manager` on its own to list the available commands. Add the comma
 
 Hermes displays the result or explains why the command could not proceed. The [workflow specification](WORKFLOW.md) defines when each operation is allowed.
 
-`ISSUE` identifies the source issue as `OWNER/REPO#N`. `SKILL` is one of `hermes-herdr-pane-manager`, `hermes-herdr-agent-manager`, or `hermes-herdr-github-project-manager`. `SHORT-SLUG` is a lowercase, hyphen-separated name for the capability gap. `SHA` is the exact Git commit ID.
+`ISSUE` identifies the issue as `OWNER/REPO#N`. `SKILL` is one of `hermes-herdr-pane-manager`, `hermes-herdr-agent-manager`, or `hermes-herdr-github-project-manager`. `SHORT-SLUG` is a lowercase, hyphen-separated name for the capability gap. `SHA` is the exact Git commit ID.
 
 ## Diagnostics
 
 | Command | Behavior | Result |
 | --- | --- | --- |
 | `/project-manager check` | Verify profile settings, the Herdr workspace, GitHub identities and repository IDs, required wiki access, and host health. | Readiness and any failed checks. |
-| `/project-manager preview` | Run a private dry run using current routes, layout, quota and version information. Save the preview locally. | Proposed work and holds. |
+| `/project-manager preview` | Run a private dry run using labeled issues, layout, quota and version information. Save the preview locally. | Proposed work and holds. |
 | `/project-manager show` | Read the latest recorded management pass in the selected profile. | Pass timestamp and result or failure. |
-| `/project-manager routes` | List the configured dashboard routing labels for target repositories. | Mapping from target repository to label. |
 | `/project-manager versions` | Read the installed revisions and the canonical `main` revisions for the three skills. | Per-skill revision and update status, including any hold. |
 
 ## Startup and recovery

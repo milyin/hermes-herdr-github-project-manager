@@ -32,7 +32,7 @@ Store the non-secret project settings directly in the selected profile's `config
 skills:
   config:
     hermes-herdr-github-project-manager:
-      name: example-manager
+      # name defaults to the local hostname
       herdr:
         instance: default
       worker:
@@ -46,10 +46,11 @@ skills:
           base: main
 ```
 
+- `name` identifies the manager in GitHub labels as `hermes:<name>`. If omitted, setup saves the local hostname as the manager name. Set a distinct name when managers sharing repositories or a dashboard would otherwise have the same name.
 - `worker.agent` selects a backend supported by the Herdr agent manager. Use a backend name such as `codex` or `hermes`. The project manager passes this value as `--agent` when provisioning and starting the worker.
 - `worker.github_identity` names the GitHub App assigned to the worker. Use `milyin-hermes` for this deployment. GitHub credentials come from the configured App access.
 
-The profile also holds the manager name, Herdr instance and verified workspace ID, dashboard identity and repository, allowlisted target repositories, numeric IDs and base branches, limits, and skill update settings. See [Hermes skill configuration](https://hermes-agent.nousresearch.com/docs/developer-guide/creating-skills#config-settings-configyaml).
+The profile also holds the Herdr instance and verified workspace ID, dashboard identity and repository, managed repositories with their numeric IDs and base branches, limits, and skill update settings. See [Hermes skill configuration](https://hermes-agent.nousresearch.com/docs/developer-guide/creating-skills#config-settings-configyaml).
 
 ## How scripts find the settings
 
