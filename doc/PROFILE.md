@@ -4,16 +4,19 @@ This guide describes the intended first run. The Hermes profile is the source of
 
 ## First run
 
-Create a Hermes profile and open it once.
+Open the configured project-manager profile.
 
 ```sh
-hermes profile create projectmanager
 hermes -p projectmanager
 ```
 
-In that session, ask Hermes to set up the profile as a GitHub project manager. Hermes uses any project settings already in the profile and asks for missing project choices, such as the repositories, dashboard and worker GitHub App account. If the profile is already configured, Hermes can proceed with those values. See [Hermes profiles](https://hermes-agent.nousresearch.com/docs/user-guide/profiles).
+Opening the profile starts setup automatically, before the first chat message. The profile's startup integration runs the [startup sequence](WORKFLOW.md#profile-startup-and-periodic-passes). It prepares the Herdr workspace, installs and enables the watchdog job, then runs the watchdog immediately to launch the manager in that workspace. The user starts everything with the command above. See [Hermes profiles](https://hermes-agent.nousresearch.com/docs/user-guide/profiles).
 
-The setup session prepares the three skill checkouts, selects or creates the manager's workspace in the local Herdr session, verifies GitHub access, and runs the [startup sequence](WORKFLOW.md#profile-startup-and-periodic-passes). It starts the manager and registers its watchdog in the same profile once preflight and activation succeed. A later setup run reuses verified checkouts, workspace and watchdog. If a host prerequisite or GitHub permission is missing, report the specific blocker in that session.
+Setup reports ready once the manager pane has a fresh apply heartbeat and Hermes confirms an enabled watchdog job with a successful run and a scheduler that will continue after the opening session exits. The readiness report identifies the workspace, manager pane, and watchdog job. Reopening the profile reuses the verified workspace and job. If required settings, the Herdr session, GitHub access or the scheduler are unavailable, report the specific blocker during startup.
+
+## Startup integration
+
+Package and enable the startup integration as part of configuring a project-manager profile. Use a Hermes `on_session_open` hook for the normal interactive launch. It starts the deterministic setup in the selected profile before any user message. The setup is shared with manual recovery and skips internal manager and worker sessions so the manager's own Hermes launch cannot start another manager. See [Hermes session-open hooks](https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks#on_session_open).
 
 ## Project settings in the profile
 
@@ -50,4 +53,4 @@ Keep generated task state, receipts and working files in the profile's private `
 
 ## Current implementation
 
-The current project manager reads a separate project YAML file and accepts `codex` as its worker backend. Reading the profile section, using the agent manager's supported backend values, and completing setup in one Hermes session require implementation. On existing installations, the setup should offer to import project settings into the profile before switching to the new reader. See the [operator guide for the current implementation](../references/operator.md).
+The current project manager reads a separate project YAML file and accepts `codex` as its worker backend. Reading the profile section, using the agent manager's supported backend values, and starting automatically when the profile opens require implementation. On existing installations, the setup should offer to import project settings into the profile before switching to the new reader. See the [operator guide for the current implementation](../references/operator.md).
