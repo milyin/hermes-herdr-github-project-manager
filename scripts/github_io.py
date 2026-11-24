@@ -222,7 +222,7 @@ class Identity:
             raise Blocked('invalid-issue-list')
         return rows
 
-    def issue(self, number):
+    def issue_record(self, number):
         self.canonical_repo()
         repo_path=f'repos/{self.repo}'
         path=f'{repo_path}/issues/{number}'
@@ -233,10 +233,15 @@ class Identity:
                 str(row.get('repository_url','')).lower()!=api_root+repo_path or
                 str(row.get('url','')).lower()!=api_root+path):
             raise Blocked('issue-routing-unknown')
+        return row
+
+    def issue(self, number):
+        row=self.issue_record(number)
+        path=f'repos/{self.repo}/issues/{number}'
         text = self.gh(['api','--paginate',f'{path}/comments?per_page=100',
                         '--jq','.[] | {author:.user.login, body,updated_at,issue_url}'])
         comments=[obj(s) for s in text.splitlines() if s.strip()]
-        if any(str(c.pop('issue_url','')).lower()!=api_root+path for c in comments):
+        if any(str(c.pop('issue_url','')).lower()!='https://api.github.com/'+path for c in comments):
             raise Blocked('issue-comment-scope-mismatch')
         self.canonical_repo()
         return row,comments
@@ -247,21 +252,41 @@ class Identity:
         title=f'Address issue #{link[1]}' if link else 'Apply reviewed project change'
         return title,f'{intro}Local review was checked for `{expected}`.\n\n{self.signature}'
 
-    def push_pr(self, cwd, branch, base, issue, expected, prior=None, *, before_write=None):
+    def push_pr(self, cwd, branch, base, issue, expected, prior=None, *, before_write, final_guard, resume,
+                previous_pr=None, before_push=None, after_push=None, before_create=None):
         # Explicit host/repository selected from local config. Never push default branch.
         if not SHA.fullmatch(expected) or not re.fullmatch(r'hermes/[a-z0-9-]+/[a-f0-9]{16}',branch):
             raise Blocked('invalid-publish-scope')
         url = f'https://github.com/{self.repo}.git'
         ref = f'refs/heads/{branch}'
+        def journal_attempt(record):
+            if not callable(record):
+                raise Blocked('publication-journal-required')
+            final_guard()
+            abort=record()
+            if not callable(abort):
+                raise Blocked('publication-journal-required')
+            try:
+                final_guard()
+            except (Blocked,OSError,ValueError):
+                abort()
+                raise
         self.check_pr_target(branch,base)
         remote = self.git(['ls-remote',url,ref]).splitlines()
+        exact=[f'{expected}\t{ref}']
+        if resume and (cwd is not None or prior is not None or remote!=exact):
+            raise Blocked('remote-publication-unverified')
+        if not resume and remote==exact:
+            raise Blocked('remote-branch-conflict')
+        if (prior is None and previous_pr is not None) or (prior is not None and (type(previous_pr) is not int or previous_pr<=0)):
+            raise Blocked('previous-publication-not-verified')
         # Reject an existing retargeted or foreign PR before touching its branch.
         if prior is not None and remote==[f'{prior}\t{ref}']:
-            if self.existing_pr(branch,base,prior,require_open=True) is None:
+            if self.existing_pr(branch,base,prior,require_open=True)!=previous_pr:
                 raise Blocked('previous-publication-not-verified')
         elif not remote and self.existing_pr(branch,base,expected) is not None:
             raise Blocked('pr-ref-not-verified')
-        if remote != [f'{expected}\t{ref}']:
+        if not resume:
             if prior is None:
                 if remote:
                     raise Blocked('remote-branch-conflict')
@@ -269,25 +294,45 @@ class Identity:
                   self.git(['-C',str(cwd),'merge-base',prior,expected]).strip()!=prior):
                 raise Blocked('remote-branch-conflict')
             self.verify()
+            before_write()
             self.check_pr_target(branch,base)
-            if before_write is not None:
-                before_write()
-            self.git(['-C',str(cwd),'push',f'--force-with-lease={ref}:{prior or ""}',url,f'{expected}:{ref}'],timeout=90)
-        if self.git(['ls-remote',url,ref]).splitlines() != [f'{expected}\t{ref}']:
+            if prior is not None and self.existing_pr(branch,base,prior,require_open=True)!=previous_pr:
+                raise Blocked('previous-publication-not-verified')
+            if not callable(after_push):
+                raise Blocked('publication-journal-required')
+            journal_attempt(before_push)
+            result=self.git(['-C',str(cwd),'push','--porcelain',f'--force-with-lease={ref}:{prior or ""}',url,f'{expected}:{ref}'],timeout=90)
+            updates=[line.split('\t') for line in result.splitlines() if '\t' in line]
+            if (len(updates)!=1 or len(updates[0])!=3 or
+                    updates[0][:2]!=['*' if prior is None else ' ',f'{expected}:{ref}']):
+                raise Blocked('push-update-not-confirmed')
+        if self.git(['ls-remote',url,ref]).splitlines() != exact:
             raise Blocked('push-not-verified')
-        number = self.existing_pr(branch,base,expected)
-        if number is None:
-            self.verify()
-            title,body = self.pr_text(issue,expected)
-            if before_write is not None:
-                before_write()
-            self.gh(['pr','create','-R',self.repo,'--base',base,'--head',branch,'--title',title,
-                     '--body',body],timeout=60)
-            number = self.existing_pr(branch,base,expected)
+        if not resume:
+            assert callable(after_push)
+            after_push()
+        number = self.existing_pr(branch,base,expected,require_open=True)
+        if previous_pr is not None:
+            if number!=previous_pr: raise Blocked('previous-publication-not-verified')
+            return number
+        if number is not None:
+            raise Blocked('unexpected-existing-pr-inspect-before-recovery')
+        self.verify()
+        title,body = self.pr_text(issue,expected)
+        before_write()
+        self.check_pr_target(branch,base)
+        if self.git(['ls-remote',url,ref]).splitlines()!=exact:
+            raise Blocked('remote-publication-unverified')
+        if self.existing_pr(branch,base,expected) is not None:
+            raise Blocked('unexpected-existing-pr-inspect-before-recovery')
+        journal_attempt(before_create)
+        self.gh(['pr','create','-R',self.repo,'--base',base,'--head',branch,'--title',title,
+                 '--body',body],timeout=60)
+        number = self.existing_pr(branch,base,expected,require_open=True,expected_text=(title,body))
         if number is None: raise Blocked('pr-not-verified')
         return number
 
-    def existing_pr(self,branch,base,expected,require_open=False):
+    def existing_pr(self,branch,base,expected,require_open=False,expected_text=None):
         text = self.gh(['pr','list','-R',self.repo,'--state','all','--head',branch,'--limit','40',
                         '--json','number,headRefOid,baseRefName,state,isCrossRepository'])
         matches = json.loads(text)
@@ -299,9 +344,11 @@ class Identity:
         self.verify_pr_route(record,base,branch)
         if require_open and record.get('state')!='open':
             raise Blocked('previous-pr-is-no-longer-open')
-        if (record.get('head',{}).get('sha') != expected
+        if (record.get('number')!=number or record.get('head',{}).get('sha') != expected
                 or record.get('user',{}).get('login') != self.spec['login']):
             raise Blocked('pr-actor-or-head-mismatch')
+        if expected_text is not None and (record.get('title'),record.get('body'))!=expected_text:
+            raise Blocked('pr-text-mismatch')
         return number
 
     def check_pr_target(self,branch,base):
@@ -335,7 +382,7 @@ class Identity:
         if not SHA.fullmatch(head): raise Blocked('ci-scope-mismatch')
         combined = self.api(f'repos/{self.repo}/commits/{head}/status')
         runs = self.gh(['api','--paginate',f'repos/{self.repo}/commits/{head}/check-runs?filter=latest&per_page=100',
-                        '--jq','.check_runs[] | {name,head_sha,status,conclusion,suite_id:.check_suite.id,app_slug:.app.slug}'])
+                        '--jq','.check_runs[] | {id,name,head_sha,status,conclusion,suite_id:.check_suite.id,app_slug:.app.slug}'])
         rows = [obj(s) for s in runs.splitlines() if s.strip()]
         if any(r.get('head_sha')!=head for r in rows) or combined.get('sha')!=head:
             raise Blocked('ci-scope-mismatch')
@@ -362,20 +409,47 @@ class Identity:
         if type(record.get('total_count')) is not int or not isinstance(runs,list) or record['total_count']!=len(runs):
             return False
         confirmed=set()
+        attempt_jobs={}
         for name,pin in policy.items():
             path,blob,workflow_id=pin['path'],pin['blob'],pin['workflow_id']
-            candidates=[c for c in checks if c.get('name')==name and c.get('status')=='completed'
-                        and c.get('conclusion')=='success' and c.get('app_slug')=='github-actions']
-            if len(candidates)!=1 or type(candidates[0].get('suite_id')) is not int:
-                return False
-            suite=candidates[0]['suite_id']
-            matching=[r for r in runs if r.get('check_suite_id')==suite and r.get('workflow_id')==workflow_id
-                      and r.get('path')==path and r.get('head_sha')==head and r.get('status')=='completed'
-                      and r.get('conclusion')=='success' and (r.get('repository') or {}).get('id')==self.repo_id
+            matching=[r for r in runs if r.get('workflow_id')==workflow_id
+                      and r.get('head_sha')==head and (r.get('repository') or {}).get('id')==self.repo_id
                       and (r.get('head_repository') or {}).get('id')==self.repo_id
-                      and (r.get('event')=='push' if main_push else r.get('event') in ('pull_request','push'))
-                      and (branch is None or r.get('head_branch')==branch)]
-            if len(matching)!=1:
+                      and r.get('event')=='push'
+                      and (branch is None or r.get('head_branch')==branch)
+                      and (not main_push or r.get('head_branch')=='main')]
+            sequence=[r.get('run_number') for r in matching]
+            if (not sequence or any(type(n) is not int or n<=0 for n in sequence)
+                    or len(set(sequence))!=len(sequence)):
+                return False
+            run=max(matching,key=lambda r:r['run_number'])
+            if (run.get('path'),run.get('status'),run.get('conclusion'))!=(path,'completed','success'):
+                return False
+            run_id=run.get('id'); attempt=run.get('run_attempt'); suite=run.get('check_suite_id')
+            if any(type(n) is not int or n<=0 for n in (run_id,attempt,suite)):
+                return False
+            if (run_id,attempt) not in attempt_jobs:
+                data=self.api(f'repos/{self.repo}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100')
+                jobs=data.get('jobs')
+                if not isinstance(jobs,list) or type(data.get('total_count')) is not int or data['total_count']!=len(jobs):
+                    return False
+                attempt_jobs[run_id,attempt]=jobs
+            jobs=[j for j in attempt_jobs[run_id,attempt] if j.get('name')==name]
+            if len(jobs)!=1 or any(jobs[0].get(k)!=v for k,v in {
+                    'run_id':run_id,'head_sha':head,
+                    'head_branch':run.get('head_branch'),'status':'completed','conclusion':'success'}.items()):
+                return False
+            # The endpoint identifies the attempt. Some responses omit the
+            # redundant per-job field, but conflicting values are invalid.
+            if 'run_attempt' in jobs[0] and jobs[0]['run_attempt']!=attempt:
+                return False
+            check_url=jobs[0].get('check_run_url')
+            candidates=[c for c in checks if c.get('suite_id')==suite and c.get('name')==name and
+                        c.get('status')=='completed' and c.get('conclusion')=='success' and
+                        c.get('app_slug')=='github-actions' and type(c.get('id')) is int and c['id']>0 and
+                        isinstance(check_url,str) and re.fullmatch(
+                            rf'https://api\.github\.com/repos/(?i:{re.escape(self.repo)})/check-runs/{c["id"]}',check_url)]
+            if len(candidates)!=1:
                 return False
             if (path,blob) not in confirmed:
                 if not WORKFLOW.fullmatch(path) or not SHA.fullmatch(blob): return False
