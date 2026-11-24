@@ -2,7 +2,7 @@
 
 A portable Agent Skill for coordinating authorized GitHub work from one dedicated Hermes pane per profile. It uses the pane and agent manager skills as its only Herdr and worker interfaces. The project policy, publishing identity and dashboard destination live in local YAML rather than in the platform code.
 
-The [workflow specification](WORKFLOW.md) is the design draft for contributors reviewing future behavior.
+The [workflow specification](doc/WORKFLOW.md) is the design draft for contributors. See [Hermes project-manager profile setup](doc/PROFILE.md) for the profile layout, project settings, and proposed configuration link.
 
 ## Install
 
