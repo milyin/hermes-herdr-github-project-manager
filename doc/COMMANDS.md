@@ -20,24 +20,31 @@ Hermes displays the result or explains why the command could not proceed. The [w
 | Command | Behavior | Result |
 | --- | --- | --- |
 | `/project-manager check` | Verify profile settings, the Herdr workspace, GitHub identities and repository IDs, required wiki access, and host health. | Readiness and any failed checks. |
-| `/project-manager preview` | Run a private dry run using labeled issues, layout, quota and version information. Save the preview locally. | Proposed work and holds. |
-| `/project-manager show` | Read the latest recorded management pass in the selected profile. | Pass timestamp and result or failure. |
+| `/project-manager show` | Read the latest recorded management pass in the selected profile. | Pass timestamp, dry-run setting, and result or failure. |
 | `/project-manager versions` | Read the installed revisions and the canonical `main` revisions for the three skills. | Per-skill revision and update status, including any hold. |
+
+## Dry run
+
+| Command | Behavior | Result |
+| --- | --- | --- |
+| `/project-manager dry-run on` | Set `dry_run: true` in the selected profile. The manager reports what it would do on subsequent passes. | Dry run enabled. |
+| `/project-manager dry-run off` | Verify profile readiness and set `dry_run: false`. The manager can resume project work as other checks permit. | Dry run disabled or the readiness blocker. |
+
+Both commands use the same manager pane and watchdog. See [dry-run behavior](WORKFLOW.md#dry-run).
 
 ## Startup and recovery
 
 | Command | Behavior | Result |
 | --- | --- | --- |
 | `/project-manager quota-setup` | Provision the dedicated Codex quota receiver in the verified workspace or use the verified profile binding. | Pane ID and whether quota could be evaluated. |
-| `/project-manager activate` | Verify startup prerequisites and bind apply mode to the effective profile settings. | Activation status and any dispatch holds. |
 | `/project-manager install-watchdog` | Enable the profile's scheduled watchdog or reuse the enabled job. Startup triggers its first run. | Job ID and enabled status. |
-| `/project-manager watchdog [--apply]` | Verify the manager in the bound workspace or start it through the pane manager. With `--apply`, require activation and check or start the apply manager. The default mode is preview. | Manager liveness or launch status, pane ID when known, and any startup hold. |
-| `/project-manager retire-uncertain ISSUE` | Release a worker slot after the operator inspects the saved checkout and verified Herdr layout shows the saved pane is gone. Preserve the assignment and its evidence. | Issue and retirement status. |
+| `/project-manager watchdog` | Verify the manager in the bound workspace or start it through the pane manager using the profile settings. | Manager liveness or launch status, pane ID when known, and any startup hold. |
+| `/project-manager retire-uncertain ISSUE` | With dry run off, release a worker slot after the operator inspects the saved checkout and verified Herdr layout shows the saved pane is gone. Preserve the assignment and its evidence. | Issue and retirement status. |
 
 ## Work and maintenance
 
 | Command | Behavior | Result |
 | --- | --- | --- |
-| `/project-manager follow-up ISSUE PROMPT` | Use the text after `ISSUE` as the follow-up prompt. Send it through the agent manager to the saved idle receiver, bound to the saved thread and prior turn. Require a verified live apply manager. | Issue, exact new turn ID, and completed or pending status. |
-| `/project-manager capability-gap SKILL SHORT-SLUG` | Create or reuse the routed issue for that capability gap in the selected skill's repository. Require a verified live apply manager. | Repository and issue number. |
-| `/project-manager sync SKILL --approved-head SHA` | With the supervisor stopped, apply the same verification as a scheduled update and fast-forward the selected skill to the approved canonical head. | Installed revision, update status, and any restart requirement. |
+| `/project-manager follow-up ISSUE PROMPT` | Use the text after `ISSUE` as the follow-up prompt. Send it through the agent manager to the saved idle receiver, bound to the saved thread and prior turn. Require a verified live manager with dry run off. | Issue, exact new turn ID, and completed or pending status. |
+| `/project-manager capability-gap SKILL SHORT-SLUG` | Create or reuse the routed issue for that capability gap in the selected skill's repository. Require a verified live manager with dry run off. | Repository and issue number. |
+| `/project-manager sync SKILL --approved-head SHA` | With the supervisor stopped and dry run off, use the same verification as a scheduled update and fast-forward the selected skill to the approved canonical head. | Installed revision, update status, and any restart requirement. |

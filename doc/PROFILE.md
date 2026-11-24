@@ -12,7 +12,7 @@ hermes -p projectmanager
 
 If the profile has the required project settings, startup runs the [startup sequence](WORKFLOW.md#profile-startup-and-periodic-passes) automatically, before the first chat message. It prepares the Herdr workspace, installs and enables the watchdog job, then runs the watchdog immediately to launch the manager. If project settings are missing, startup begins the [setup interview](#setup-interview). See [Hermes profiles](https://hermes-agent.nousresearch.com/docs/user-guide/profiles).
 
-Setup reports ready once the manager pane has a fresh apply heartbeat and Hermes confirms an enabled watchdog job with a successful run and a scheduler that will continue after the opening session exits. The readiness report identifies the workspace, manager pane, and watchdog job. Reopening the profile reuses the verified workspace and job. If the Herdr session, GitHub access or the scheduler are unavailable, report the specific blocker during startup.
+Setup reports ready once the manager pane has a fresh heartbeat and Hermes confirms an enabled watchdog job with a successful run and a scheduler that will continue after the opening session exits. The readiness report identifies the workspace, manager pane, watchdog job, and whether dry run is on. Reopening the profile reuses the verified workspace and job. If the Herdr session, GitHub access or the scheduler are unavailable, report the specific blocker during startup.
 
 ## Startup integration
 
@@ -22,7 +22,7 @@ Package and enable the startup integration as part of configuring a project-mana
 
 When the project settings section is absent or required choices are missing, Hermes opens the interview in the same session and presents the first question. The derived `SKILL.md` contains the interview instructions.
 
-Ask only for missing project choices, such as the target repositories, dashboard, worker backend, and GitHub App identity. Resolve repository and Herdr IDs through the project manager tools, and keep GitHub credentials in the configured App access. Save the answers in the selected profile. If the interview is interrupted, resume from the saved answers on the next run. Once the required settings are saved and validated, continue through the normal startup sequence in the same session.
+Ask only for missing project choices, such as the target repositories, dashboard, worker backend, and GitHub App identity. Offer dry run as an optional setup setting. Resolve repository and Herdr IDs through the project manager tools, and keep GitHub credentials in the configured App access. Save the answers in the selected profile. If the interview is interrupted, resume from the saved answers on the next run. Once the required settings are saved and validated, continue through the normal startup sequence in the same session.
 
 ## Project settings in the profile
 
@@ -33,6 +33,7 @@ skills:
   config:
     hermes-herdr-github-project-manager:
       # name defaults to the local hostname
+      dry_run: false
       herdr:
         instance: default
       worker:
@@ -47,6 +48,7 @@ skills:
 ```
 
 - `name` identifies the manager in GitHub labels as `hermes:<name>`. If omitted, setup saves the local hostname as the manager name. Set a distinct name when managers sharing repositories or a dashboard would otherwise have the same name.
+- `dry_run` is a boolean and defaults to `false`. Set it to `true` during setup to see what the manager would do. The manager and watchdog start with either value. Change it later with [the dry-run command](COMMANDS.md#dry-run).
 - `worker.agent` selects a backend supported by the Herdr agent manager. Use a backend name such as `codex` or `hermes`. The project manager passes this value as `--agent` when provisioning and starting the worker.
 - `worker.github_identity` names the GitHub App assigned to the worker. Use `milyin-hermes` for this deployment. GitHub credentials come from the configured App access.
 
@@ -56,4 +58,4 @@ The profile also holds the Herdr instance and verified workspace ID, dashboard i
 
 Hermes selects the profile when it starts. Manager scripts use that profile context to read the configured section directly, for example with Hermes's configuration reader and the key `skills.config.hermes-herdr-github-project-manager`. The manager session, setup commands and scheduled watchdog use the same profile and effective settings. The launcher supplies the profile context to background processes. The user selects the profile on the Hermes command line.
 
-Keep generated task state, receipts and working files in the profile's private `github-project-manager/` directory. The profile's configuration is the single source of project settings. When those settings change, revalidate them before applying the workflow.
+Keep generated task state, receipts and working files in the profile's private `github-project-manager/` directory. The profile's configuration is the single source of project settings. Revalidate changed settings before using them.
