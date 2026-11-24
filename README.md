@@ -20,6 +20,8 @@ python3 -B "$skill_dir/scripts/manager.py" --help
 
 Edit the private configuration before running a pass. In particular, do not overwrite an existing configuration with the example. See the [operator contract](references/operator.md) for preflight, the exact start/cron sequence, authentication, routing, review handoffs, and recovery.
 
+The [draft workflow specification](references/workflow.md) records proposed changes separately from the current behavior below.
+
 ## Behavior
 
 - A shared dashboard wiki gets separate pages per manager, with routed issues, PR checks, work queues, pane layout and health. Each owned repo has its own manager page. Work on external repositories is tracked centrally.
