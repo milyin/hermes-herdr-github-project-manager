@@ -27,7 +27,8 @@ skills:
       herdr:
         instance: default
       worker:
-        github_app: example-app
+        agent: codex
+        github_identity: milyin-hermes
       dashboard:
         repo: example-org/manager-dashboard
       repositories:
@@ -36,7 +37,10 @@ skills:
           base: main
 ```
 
-The profile holds the manager name, Herdr instance and verified workspace ID, worker settings and assigned GitHub App account, dashboard identity and repository, and the allowlisted target repositories, numeric IDs and base branches. It also holds the manager's limits and skill update settings. Use the existing App credential setup for GitHub authentication. Store only the account name or credential reference in this profile section. See [Hermes skill configuration](https://hermes-agent.nousresearch.com/docs/developer-guide/creating-skills#config-settings-configyaml).
+- `worker.agent` selects a backend supported by the Herdr agent manager. The current agent manager supports `codex` and `hermes`. The project manager passes this value as `--agent` when provisioning and starting the worker.
+- `worker.github_identity` names the GitHub App assigned to the worker. Use `milyin-hermes` for this deployment. GitHub credentials come from the configured App access.
+
+The profile also holds the manager name, Herdr instance and verified workspace ID, dashboard identity and repository, allowlisted target repositories, numeric IDs and base branches, limits, and skill update settings. See [Hermes skill configuration](https://hermes-agent.nousresearch.com/docs/developer-guide/creating-skills#config-settings-configyaml).
 
 ## How scripts find the settings
 
@@ -46,4 +50,4 @@ Keep generated task state, receipts and working files in the profile's private `
 
 ## Current implementation
 
-The current manager still reads a separate project YAML file. Reading the profile section and completing setup in one Hermes session require implementation. On existing installations, the setup should offer to import project settings into the profile before switching to the new reader. See the [operator guide for the current implementation](../references/operator.md).
+The current project manager reads a separate project YAML file and accepts `codex` as its worker backend. Reading the profile section, using the agent manager's supported backend values, and completing setup in one Hermes session require implementation. On existing installations, the setup should offer to import project settings into the profile before switching to the new reader. See the [operator guide for the current implementation](../references/operator.md).
