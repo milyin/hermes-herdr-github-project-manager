@@ -1,7 +1,5 @@
 # Operator contract
 
-This guide describes the current implementation. See the [draft workflow specification](workflow.md) for proposed changes.
-
 ## Configure and preflight
 
 Install Python 3.10+, PyYAML, Git, `gh` and Hermes on Linux. Install the Herdr pane-manager and agent-manager skills in the same profile. Use their public entry points only. The manager launches its own interactive Hermes process as the application in a dedicated pane; Codex workers and quota probes go through the agent manager. The manager never reads the worker's internal transport or transcript.

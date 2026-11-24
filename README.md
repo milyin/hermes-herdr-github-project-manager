@@ -2,6 +2,8 @@
 
 A portable Agent Skill for coordinating authorized GitHub work from one dedicated Hermes pane per profile. It uses the pane and agent manager skills as its only Herdr and worker interfaces. The project policy, publishing identity and dashboard destination live in local YAML rather than in the platform code.
 
+The [workflow specification](WORKFLOW.md) is the design draft for contributors reviewing future behavior.
+
 ## Install
 
 Clone the whole repository as `hermes-herdr-github-project-manager` under the active profile's `skills` directory. Install the dependencies in the same profile and ensure the Python interpreter used to run the manager has PyYAML. Keep the configuration outside the checkout.
@@ -19,8 +21,6 @@ python3 -B "$skill_dir/scripts/manager.py" --help
 ```
 
 Edit the private configuration before running a pass. In particular, do not overwrite an existing configuration with the example. See the [operator contract](references/operator.md) for preflight, the exact start/cron sequence, authentication, routing, review handoffs, and recovery.
-
-The [draft workflow specification](references/workflow.md) records proposed changes separately from the current behavior below.
 
 ## Behavior
 
