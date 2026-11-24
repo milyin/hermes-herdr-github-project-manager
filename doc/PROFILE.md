@@ -4,19 +4,25 @@ This guide describes the intended first run. The Hermes profile is the source of
 
 ## First run
 
-Open the configured project-manager profile.
+Open a profile enabled for the project-manager role.
 
 ```sh
 hermes -p projectmanager
 ```
 
-Opening the profile starts setup automatically, before the first chat message. The profile's startup integration runs the [startup sequence](WORKFLOW.md#profile-startup-and-periodic-passes). It prepares the Herdr workspace, installs and enables the watchdog job, then runs the watchdog immediately to launch the manager in that workspace. The user starts everything with the command above. See [Hermes profiles](https://hermes-agent.nousresearch.com/docs/user-guide/profiles).
+If the profile has the required project settings, startup runs the [startup sequence](WORKFLOW.md#profile-startup-and-periodic-passes) automatically, before the first chat message. It prepares the Herdr workspace, installs and enables the watchdog job, then runs the watchdog immediately to launch the manager. If project settings are missing, startup begins the [setup interview](#setup-interview). See [Hermes profiles](https://hermes-agent.nousresearch.com/docs/user-guide/profiles).
 
-Setup reports ready once the manager pane has a fresh apply heartbeat and Hermes confirms an enabled watchdog job with a successful run and a scheduler that will continue after the opening session exits. The readiness report identifies the workspace, manager pane, and watchdog job. Reopening the profile reuses the verified workspace and job. If required settings, the Herdr session, GitHub access or the scheduler are unavailable, report the specific blocker during startup.
+Setup reports ready once the manager pane has a fresh apply heartbeat and Hermes confirms an enabled watchdog job with a successful run and a scheduler that will continue after the opening session exits. The readiness report identifies the workspace, manager pane, and watchdog job. Reopening the profile reuses the verified workspace and job. If the Herdr session, GitHub access or the scheduler are unavailable, report the specific blocker during startup.
 
 ## Startup integration
 
-Package and enable the startup integration as part of configuring a project-manager profile. Use a Hermes `on_session_open` hook for the normal interactive launch. It starts the deterministic setup in the selected profile before any user message. The setup is shared with manual recovery and skips internal manager and worker sessions so the manager's own Hermes launch cannot start another manager. See [Hermes session-open hooks](https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks#on_session_open).
+Package and enable the startup integration as part of configuring a project-manager profile. Use a Hermes `on_session_open` hook for the normal interactive launch. It checks the selected profile before any user message and either starts the manager setup or marks the interview as pending. The setup is shared with manual recovery and skips internal manager and worker sessions so the manager's own Hermes launch cannot start another manager. See [Hermes session-open hooks](https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks#on_session_open).
+
+## Setup interview
+
+The derived `SKILL.md` contains the interview instructions. The profile startup integration invokes the interview when the project settings section is absent or required choices are missing. In the classic CLI, use the first interactive turn to load the skill and ask the first question. Hermes supports adding that instruction to the turn through a `pre_llm_call` hook. Showing a question before any input in the classic CLI would require a launcher or client integration. See [Hermes turn context hooks](https://hermes-agent.nousresearch.com/docs/developer-guide/plugins#pre_llm_call-context-injection).
+
+Ask only for missing project choices, such as the target repositories, dashboard, worker backend, and GitHub App identity. Resolve repository and Herdr IDs through the existing tools, and keep GitHub credentials in the configured App access. Save the answers in the selected profile. If the interview is interrupted, resume from the saved answers on the next run. Once the required settings are saved and validated, continue through the normal startup sequence in the same session.
 
 ## Project settings in the profile
 
