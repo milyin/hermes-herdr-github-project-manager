@@ -41,6 +41,12 @@ SKILL_UPDATE_INTERVAL = 1800
 UPDATE_INTENT = 'skill-update.pending.json'
 CONTROLLER_LOCK = 'manager.controller.lock'
 HEARTBEAT_MAX_AGE = 180
+APPROVAL_NAMESPACE = 'hermes-herdr-project-publication-v1'
+APPROVAL_PRINCIPAL = 'project-manager-operator'
+APPROVAL_LIFETIME = 900
+APPROVAL_TRUST = Path('/etc/hermes-herdr-github-project-manager/operators')
+APPROVAL_VERIFIER = Path('/usr/bin/ssh-keygen')
+APPROVAL_LIMIT = 16384
 
 
 class Settings(yaml.SafeLoader):
@@ -253,7 +259,10 @@ class State:
         save_private(self.path,self.data)
 
     def event(self,kind,item=None):
-        self.data['events'].append({'at':stamp(),'kind':kind,'item':item})
+        event={'at':stamp(),'kind':kind,'item':item}
+        binding=self.data['items'].get(item,{}).get('issue_binding')
+        if isinstance(binding,dict): event['issue_binding']=dict(binding)
+        self.data['events'].append(event)
         self.data['events'] = self.data['events'][-300:]
         self.save()
 
@@ -548,10 +557,28 @@ def issue_binding(cfg,key,project,issue_id):
     return ids
 
 
-def bound_issue(cfg,key,row):
+def saved_binding(cfg,key,row):
+    require(ITEM.fullmatch(key) is not None and row.get('project') in cfg['repositories'],'issue-binding-unverified')
+    source=key.split('#',1)[0]
+    require(source==cfg['dashboard']['repo'] or source==row['project'] and
+            cfg['repositories'][source].get('kind')=='owned','issue-route-mismatch')
     binding=row.get('issue_binding')
     require(isinstance(binding,dict),'issue-binding-unverified')
     require(binding==issue_binding(cfg,key,row['project'],binding.get('issue_id')),'issue-binding-changed')
+    return binding
+
+
+def verify_saved_issue(cfg,key,row):
+    binding=saved_binding(cfg,key,row)
+    source,n=key.split('#',1)
+    if source!=row['project']:
+        identity(cfg,row['project']).canonical_repo()
+    issue=identity(cfg,source).issue_record(int(n))
+    require(type(issue.get('id')) is int and issue['id']==binding['issue_id'],'issue-binding-changed')
+
+
+def bound_issue(cfg,key,row):
+    binding=saved_binding(cfg,key,row)
     issue,comments=verified_issue(cfg,key,row['project'])
     require(type(issue.get('id')) is int and issue['id']==binding['issue_id'],'issue-binding-changed')
     return issue,comments
@@ -741,15 +768,27 @@ def verify_update_history(gh,git,old,expected):
     require(0<len(chain)<=12 and chain[0]==expected and all(SHA.fullmatch(x) for x in chain)
             and git('rev-parse',chain[-1]+'^1')==old,'update-first-parent-history-unverified')
     for sha in chain:
+        parents=git('rev-list','--parents','--max-count=1',sha).split()
+        require(len(parents) in (2,3) and parents[0]==sha and all(SHA.fullmatch(x) for x in parents),
+                'update-first-parent-history-unverified')
+        base_sha=parents[1]
         text=gh.gh(['api','--paginate',f'repos/{gh.repo}/commits/{sha}/pulls?per_page=100','--jq',
                     '.[] | select(.merged_at != null) | {number,merge_commit_sha,merged_at,base,head}'])
         rows=[obj(line) for line in text.splitlines() if line.strip()]
         matches=[p for p in rows if p.get('merge_commit_sha')==sha and epoch(p.get('merged_at')) is not None and
                  type(p.get('number')) is int and p['number']>0 and (p.get('base') or {}).get('ref')=='main' and
+                 (p.get('base') or {}).get('sha')==base_sha and
                  ((p.get('base') or {}).get('repo') or {}).get('id')==gh.repo_id and
                  SHA.fullmatch((p.get('head') or {}).get('sha') or '')]
         require(len(matches)==1,'update-requires-reviewed-pr-provenance')
         pr=matches[0]; pr_head=pr['head']['sha']; number=pr['number']
+        declared_base=[line for line in git('show','-s','--format=%B',pr_head).splitlines()
+                       if line.lower().startswith('hermes-update-base:')]
+        require((len(parents)==2 or parents[2]==pr_head) and
+                git('merge-base',base_sha,pr_head)==base_sha and
+                git('rev-parse',sha+'^{tree}')==git('rev-parse',pr_head+'^{tree}') and
+                declared_base==[f'Hermes-Update-Base: {base_sha}'],
+                'update-reviewed-range-mismatch')
         text=gh.gh(['api','--paginate',f'repos/{gh.repo}/pulls/{number}/reviews?per_page=100','--jq',
                     '.[] | {id,state,commit_id,user_id:.user.id,submitted_at}'])
         approvals=[r for line in text.splitlines() if line.strip() and
@@ -758,7 +797,9 @@ def verify_update_history(gh,git,old,expected):
                    epoch(r.get('submitted_at')) is not None and epoch(r['submitted_at'])<=epoch(pr['merged_at'])]
         for approval in reversed(approvals):
             try:
-                verify_review(gh,number,pr_head,approval['id'])
+                review=verify_review(gh,number,pr_head,approval['id'])
+                require(epoch(review.get('submitted_at'))<=epoch(pr['merged_at']),
+                        'update-requires-reviewed-pr-provenance')
             except Blocked:
                 continue
             break
@@ -784,8 +825,10 @@ def sync_candidate(cfg,state,name,expected,guard):
         exact_main()
         old=git('rev-parse','HEAD')
         if old==expected: return {'name':name,'status':'current','local_head':old,'remote_head':expected}
-        require(gh.check_state(expected,repo_policy(cfg,repo).get('trusted_checks',{}),branch='main',main_push=True)=='pass',
-                'update-requires-exact-head-green-ci')
+        def exact_ci():
+            require(gh.check_state(expected,repo_policy(cfg,repo).get('trusted_checks',{}),branch='main',main_push=True)=='pass',
+                    'update-requires-exact-head-green-ci')
+        exact_ci()
         guard()
         gh.git(['-C',str(p),'fetch','--no-tags',remote,ref],timeout=90)
         require(git('rev-parse','FETCH_HEAD')==expected,'approved-update-no-longer-main')
@@ -798,6 +841,8 @@ def sync_candidate(cfg,state,name,expected,guard):
         require(not os.path.lexists(journal),'previous-skill-update-needs-verification')
         save_private(journal,{'name':name,'repo':repo,'before':old,'target':expected})
         try:
+            exact_ci()
+            exact_main()
             guard()
             require(same_installation(p,repo) and clean_main(p) and git('rev-parse','HEAD')==old,'skill-changed-during-update')
         except (Blocked,OSError):
@@ -869,6 +914,7 @@ def reconcile(cfg,state,adapter):
                     row['state']='uncertain'; state.event('turn-outcome-unavailable',key)
         if type(row.get('pr')) is int:
             try:
+                verify_saved_issue(cfg,key,row)
                 auth=identity(cfg,row['project'])
                 if row.get('pr_base') and row.get('pr_branch'):
                     latest=auth.pull_state(row['pr'],base=row['pr_base'],branch=row['pr_branch'],
@@ -899,105 +945,225 @@ def reconcile(cfg,state,adapter):
                     row['state']='human'
                 elif latest['state']=='working' and latest['checks']=='fail':
                     row['state']='waiting'
-            except Blocked:
-                row.pop('checks',None)
+            except Blocked as e:
+                for stale in ('checks','reviewed_head','review_id'):
+                    row.pop(stale,None)
+                row['hold']=str(e) if str(e) in ('issue-binding-changed','issue-binding-unverified') else 'tracked-pr-verification-held'
                 if row.get('state')=='human': row['state']='working'
     state.save()
 
 
-def disclosure_scope(cfg,key,row,expected):
+def read_bounded(path,limit=APPROVAL_LIMIT,*,root_owned=False):
+    with os.fdopen(os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK),'rb') as f:
+        st=os.fstat(f.fileno())
+        require(stat.S_ISREG(st.st_mode) and 0<st.st_size<=limit,'invalid-publication-approval-file')
+        if root_owned:
+            require(st.st_uid==0 and not st.st_mode&0o022 and st.st_nlink==1,'operator-trust-anchor-unverified')
+        content=f.read(limit+1)
+    require(0<len(content)<=limit,'invalid-publication-approval-file')
+    return content.decode('utf-8')
+
+
+def operator_public_key():
+    uid=os.getuid()
+    require(uid!=0 and os.geteuid()==uid,'publication-requires-non-root-controller')
+    path=APPROVAL_TRUST/f'{uid}.pub'
+    for folder in path.parents:
+        try:
+            st=folder.lstat()
+        except OSError as e:
+            raise Blocked('operator-trust-anchor-unverified') from e
+        require(stat.S_ISDIR(st.st_mode) and st.st_uid==0 and not st.st_mode&0o022,'operator-trust-anchor-unverified')
+    try:
+        key=read_bounded(path,4096,root_owned=True).strip()
+    except (OSError,UnicodeError) as e:
+        raise Blocked('operator-trust-anchor-unverified') from e
+    require(re.fullmatch(r'ssh-ed25519 [A-Za-z0-9+/]{68}(?: [^\r\n]*)?',key) is not None,
+            'operator-trust-anchor-unverified')
+    return ' '.join(key.split()[:2])
+
+
+def approval_message(scope,*,now=None):
+    issued=int(time.time() if now is None else now)
+    return json.dumps({'schema':1,'publication':scope,'issued_at':stamp(issued),
+                       'expires_at':stamp(issued+APPROVAL_LIFETIME)},
+                      sort_keys=True,separators=(',',':'),ensure_ascii=True,allow_nan=False)+'\n'
+
+
+def verify_publication_approval(root,scope,approval,*,now=None):
+    require(isinstance(approval,dict) and set(approval)=={'message','signature'},'operator-publication-approval-required')
+    message=approval['message']; signature=approval['signature']
+    require(isinstance(message,str) and len(message.encode())<=APPROVAL_LIMIT and
+            isinstance(signature,str) and len(signature.encode())<=APPROVAL_LIMIT and
+            signature.startswith('-----BEGIN SSH SIGNATURE-----\n') and
+            signature.rstrip('\n').endswith('\n-----END SSH SIGNATURE-----'),
+            'invalid-operator-publication-signature')
+    issued=epoch(obj(message).get('issued_at'))
+    require(message==approval_message(scope,now=issued),'publication-approval-scope-changed')
+    def check_age():
+        require(0<=(time.time() if now is None else now)-issued<APPROVAL_LIFETIME,'publication-approval-expired')
+    check_age()
+    key=operator_public_key()
+    with tempfile.TemporaryDirectory(prefix='approval-',dir=private(root/'scratch')) as tmp:
+        allowed=Path(tmp)/'allowed_signers'; sig=Path(tmp)/'request.sig'
+        allowed.write_text(f'{APPROVAL_PRINCIPAL} namespaces="{APPROVAL_NAMESPACE}" {key}\n',encoding='utf-8')
+        sig.write_text(signature,encoding='utf-8')
+        try:
+            call([str(APPROVAL_VERIFIER),'-Y','verify','-f',str(allowed),'-I',APPROVAL_PRINCIPAL,
+                  '-n',APPROVAL_NAMESPACE,'-s',str(sig)],data=message)
+        except Blocked as e:
+            raise Blocked('invalid-operator-publication-signature') from e
+    check_age()
+
+
+def publication_branch(cfg,row):
+    branch=row.get('pr_branch') or row.get('publish_branch') or f'hermes/{cfg["name"]}/{row.get("checkout", "")}'
+    require(re.fullmatch(r'hermes/'+re.escape(cfg['name'])+r'/[a-f0-9]{16}',branch),'invalid-publication-branch')
+    return branch
+
+
+def publication_scope(cfg,root,key,row,expected,*,recover=False):
     require(ITEM.fullmatch(key) and SHA.fullmatch(expected) and row.get('project') in cfg['repositories'],
-            'invalid-disclosure-scope')
+            'invalid-publication-scope')
     source=key.split('#',1)[0]; target=row['project']
-    require(source!=target,'disclosure-scope-requires-distinct-repositories')
     bound_issue(cfg,key,row)
-    source_vis=audience(identity(cfg,source).canonical_repo())
-    target_vis=audience(identity(cfg,target).canonical_repo())
-    require(source_vis and target_vis,'disclosure-audience-unverified')
-    scope={'schema':1,'issue':key,'target':target,'source_visibility':source_vis,
-           'target_visibility':target_vis,'base':cfg['repositories'][target]['base'],
-           'binding':row['issue_binding'],'head':expected,'configuration':config_digest(cfg)}
-    return dict(scope,authorization=hashlib.sha256(json.dumps(scope,sort_keys=True).encode()).hexdigest())
+    auth=identity(cfg,target)
+    target_vis=audience(auth.canonical_repo())
+    require(target_vis=='public','publication-target-audience-unverified')
+    source_vis=target_vis if source==target else audience(identity(cfg,source).canonical_repo())
+    require(source_vis is not None,'publication-source-audience-unverified')
+    base=cfg['repositories'][target]['base']; base_ref=f'refs/heads/{base}'
+    refs=auth.git(['ls-remote','--exit-code',f'https://github.com/{target}.git',base_ref]).splitlines()
+    require(len(refs)==1 and re.fullmatch(r'[0-9a-f]{40}\t'+re.escape(base_ref),refs[0]),'publication-base-head-unverified')
+    title,body=auth.pr_text(key,expected)
+    branch=publication_branch(cfg,row)
+    scope={'issue':key,'target':target,'source_visibility':source_vis,'target_visibility':target_vis,
+            'base':base,'base_sha':refs[0].split('\t')[0],'binding':row['issue_binding'],'head':expected,
+            'branch':branch,'title':title,'body':body,
+            'previous_head':row.get('published_sha'),'previous_pr':row.get('pr'),
+            'configuration':config_digest(cfg),'profile':hashlib.sha256(os.fsencode(root)).hexdigest()}
+    if recover:
+        require(row.get('state') in ('publishing','uncertain') and row.get('publish_sha')==expected
+                and row.get('publish_branch')==branch,'no-recoverable-publication-intent')
+        ref=f'refs/heads/{branch}'
+        require(auth.git(['ls-remote',f'https://github.com/{target}.git',ref]).splitlines()==[f'{expected}\t{ref}'],
+                'remote-publication-unverified')
+        scope.update(operation='recover-existing-ref',recovery_pr=auth.existing_pr(branch,base,expected,require_open=True,
+                     expected_text=(title,body) if row.get('published_sha') is None else None))
+    return scope
 
 
-def publish_item(cfg,state,key,expected,guard,*,disclosure=None):
+def publish_item(cfg,state,key,expected,guard,*,approval=None,recover=False):
     require(ITEM.fullmatch(key) and SHA.fullmatch(expected),'invalid-issue-or-approved-head')
     row=state.data['items'].get(key,{})
-    require(row.get('state') in ('waiting','uncertain') and row.get('checkout') and row.get('project') in cfg['repositories'],'no-reviewed-candidate-scope')
+    require(row.get('state') in ('waiting','uncertain','publishing') and row.get('checkout') and row.get('project') in cfg['repositories'],'no-reviewed-candidate-scope')
     project=row['project']
-    cross=key.split('#',1)[0]!=project
-    consent=None
-    if cross:
-        consent=disclosure_scope(cfg,key,row,expected)
-        if disclosure is None and row.get('state')=='uncertain' and row.get('publish_sha')==expected:
-            require(row.get('pending_disclosure')==consent,'exact-disclosure-not-authorized')
-        else:
-            require(disclosure==consent['authorization'],'exact-disclosure-not-authorized')
-    else:
-        require(disclosure is None,'unexpected-disclosure-authorization')
-    def before_write():
-        if cross:
-            require(disclosure_scope(cfg,key,row,expected)==consent,'disclosure-scope-changed')
-        else:
-            bound_issue(cfg,key,row)
-        guard()
-    before_write()
-    c=state.root/'work'/row['checkout']
-    require(c.is_dir() and c.resolve()==c and re.fullmatch(r'[a-f0-9]{16}',c.name),'unsafe-candidate-worktree')
-    git=identity(cfg,project)
-
-    # Use a configured title/issue pointer only. The caller verifies the independent local review before authorizing the exact SHA.
-    branch=row.get('pr_branch') or row.get('publish_branch') or f'hermes/{cfg["name"]}/{os.urandom(8).hex()}'
-    require(row.get('state')!='uncertain' or row.get('publish_sha')==expected,'uncertain-assignment-is-not-publication-authorization')
-    require(row.get('state')!='uncertain' or row.get('publish_branch') or row.get('pr_branch'),
+    interrupted=row.get('state') in ('uncertain','publishing')
+    require(not recover or (approval is not None and interrupted),'recovery-approval-required')
+    if approval is None and interrupted and row.get('publish_sha')==expected:
+        approval=row.get('pending_approval')
+    require(approval is not None,'operator-publication-approval-required')
+    assert approval is not None
+    accepted_approval=approval
+    require(not interrupted or row.get('publish_sha')==expected,'uncertain-assignment-is-not-publication-authorization')
+    require(not interrupted or row.get('publish_branch') or row.get('pr_branch'),
             'ambiguous-publication-missing-branch-receipt')
+    branch=publication_branch(cfg,row)
+    def before_write():
+        scope=publication_scope(cfg,state.root,key,row,expected,recover=recover)
+        verify_publication_approval(state.root,scope,approval)
+        guard()
+        return scope
+    authorization=before_write()
+    git=identity(cfg,project)
     base=cfg['repositories'][project]['base']
     remote=f'https://github.com/{project}.git'
     ref=f'refs/heads/{base}'
-    if row.get('state')=='uncertain':
+    def final_guard():
+        issued=epoch(obj(accepted_approval['message']).get('issued_at'))
+        require(0<=time.time()-issued<APPROVAL_LIFETIME,'publication-approval-expired')
+        guard()
+        require(0<=time.time()-issued<APPROVAL_LIFETIME,'publication-approval-expired')
+    def journal_attempt(event,changes,clear=()):
+        before=dict(row)
+        for field in clear: row.pop(field,None)
+        row.update(changes,pending_approval=approval)
+        state.event(event,key)
+        def abort():
+            # The final guard rejected the write before calling the transport.
+            row.clear()
+            row.update(before)
+            state.event('publication-held-before-write',key)
+        return abort
+    def journal_create():
+        return journal_attempt('pr-creation-started',{'pr_create_attempted':True})
+    if interrupted:
         head_ref=f'refs/heads/{branch}'
         remote_lines=git.git(['ls-remote',remote,head_ref]).splitlines()
         prior=row.get('published_sha')
         if remote_lines==[f'{expected}\t{head_ref}']:
-            existing=git.existing_pr(branch,base,expected,require_open=prior is not None)
+            require(row.get('push_confirmed') is True or recover,'recovery-approval-required')
+            existing=git.existing_pr(branch,base,expected,require_open=True)
+            require(not recover or existing==authorization['recovery_pr'],'publication-approval-scope-changed')
             require(prior is None or (type(existing) is int and existing==row.get('pr')),
                     'previous-publication-not-verified')
             if existing is not None:
-                before_write()
+                require(prior is not None or row.get('pr_create_attempted') is True or recover,'recovery-approval-required')
+                if prior is None:
+                    require(git.existing_pr(branch,base,expected,require_open=True,
+                            expected_text=git.pr_text(key,expected))==existing,'remote-publication-unverified')
                 require(git.git(['ls-remote',remote,head_ref]).splitlines()==remote_lines,'remote-publication-unverified')
-                return published(state,row,key,project,existing,expected,base,branch)
+                before_write()
+                return published(state,row,key,project,existing,expected,base,branch,approval)
+            # The exact ref is already published. Do not push if it moves.
+            pr=git.push_pr(None,branch,base,key,expected,before_write=before_write,resume=True,
+                           before_create=journal_create,final_guard=final_guard)
+            return published(state,row,key,project,pr,expected,base,branch,approval)
         elif prior is not None and SHA.fullmatch(prior) and remote_lines==[f'{prior}\t{head_ref}']:
             existing=git.existing_pr(branch,base,prior,require_open=True)
             require(type(existing) is int and existing==row.get('pr'),'previous-publication-not-verified')
         else:
             require(prior is None and not remote_lines,'remote-publication-unverified')
+    require(not recover,'remote-publication-unverified')
+    c=state.root/'work'/row['checkout']
+    require(c.is_dir() and c.resolve()==c and re.fullmatch(r'[a-f0-9]{16}',c.name),'unsafe-candidate-worktree')
     with tempfile.TemporaryDirectory(prefix='publication-',dir=private(state.root/'scratch')) as tmp:
         d=Path(tmp)/'publish.git'
         call(['git','init','--bare','--quiet','--template=',str(d)])
         git.git(['-C',str(d),'fetch','--no-tags',remote,ref],timeout=90)
         base_sha=call(['git','-C',str(d),'rev-parse','FETCH_HEAD']).strip()
+        require(base_sha==authorization['base_sha'],'publication-approval-scope-changed')
         import_bundle(d,c/'candidate.bundle',expected)
         for ancestor in (row['base_sha'],base_sha):
             require(SHA.fullmatch(ancestor) and ancestor!=expected and
                     call(['git','-C',str(d),'merge-base',ancestor,expected]).strip()==ancestor,'candidate-not-based-on-current-target')
         require(git.git(['ls-remote',remote,ref]).splitlines()==[f'{base_sha}\t{ref}'],'target-base-changed')
         before_write()
-        if consent is not None:
-            row['pending_disclosure']=consent
-        row.update(state='publishing',publish_sha=expected,publish_branch=branch); state.event('publication-started',key)
+        def journal_push():
+            return journal_attempt('publication-started',{'state':'publishing','publish_sha':expected,'publish_branch':branch},
+                                   ('push_confirmed','pr_create_attempted'))
+        def confirmed_push():
+            row['push_confirmed']=True
+            state.save()
         try:
-            pr=git.push_pr(d,branch,base,key,expected,row.get('published_sha'),before_write=before_write)
+            pr=git.push_pr(d,branch,base,key,expected,row.get('published_sha'),before_write=before_write,
+                           resume=False,previous_pr=row.get('pr'),before_push=journal_push,after_push=confirmed_push,
+                           before_create=journal_create,final_guard=final_guard)
         except Blocked:
-            row['state']='uncertain'; state.event('publication-unverified',key); raise
-    return published(state,row,key,project,pr,expected,base,branch)
+            if row['state']=='publishing':
+                row['state']='uncertain'; state.event('publication-unverified',key)
+            raise
+    return published(state,row,key,project,pr,expected,base,branch,approval)
 
 
-def published(state,row,key,project,pr,expected,base,branch):
+def published(state,row,key,project,pr,expected,base,branch,approval):
     row.pop('report',None)
     row.pop('publish_sha',None)
     row.pop('publish_branch',None)
-    if 'pending_disclosure' in row:
-        row['published_disclosure']=row.pop('pending_disclosure')
+    row.pop('push_confirmed',None)
+    row.pop('pr_create_attempted',None)
+    row.pop('pending_approval',None)
+    row['publication_approval_sha256']=hashlib.sha256(approval['signature'].encode()).hexdigest()
     row.update(state='working',pr=pr,head=expected,published_sha=expected,pr_base=base,pr_branch=branch); state.event('pr-published',key)
     return {'repository':project,'pr':pr,'head':expected}
 
@@ -1008,7 +1174,22 @@ def wiki_allows(cfg,metadata,dest,source,project):
             all(audience(metadata.get(repo,{}))=='public' for repo in {source,project}-{None,dest}))
 
 
+def unrouted_wiki_binding(cfg,key):
+    match=ITEM.fullmatch(key)
+    require(match is not None and match[1]==cfg['dashboard']['repo'],'issue-route-mismatch')
+    assert match is not None
+    source,number=match.groups()
+    issue=identity(cfg,source).issue_record(int(number))
+    labels=[r.get('name') for r in issue.get('labels',[]) if isinstance(r,dict)]
+    require(issue.get('state')=='open' and routed(labels,cfg['name']) and
+            dashboard_target(cfg,str(issue.get('title','')),labels) is None,'issue-route-changed')
+    issue_id=issue.get('id'); repo_id=cfg['dashboard'].get('repo_id')
+    require(all(type(v) is int and v>0 for v in (issue_id,repo_id)),'issue-binding-unverified')
+    return {'source_repo_id':repo_id,'target_repo_id':None,'issue_id':issue_id}
+
+
 def check_wiki_visibility(cfg,metadata,dest,rows):
+    rows=list(rows)
     repos={dest}
     for key,row in rows:
         repos.update(r for r in (key.split('#',1)[0],row.get('project')) if r)
@@ -1018,18 +1199,47 @@ def check_wiki_visibility(cfg,metadata,dest,rows):
         require(type(data.get('id')) is int and data['id']==prior.get('id') and audience(data) is not None and
                 audience(data)==audience(prior) and
                 (repo!=dest or data.get('has_wiki') is True),'wiki-visibility-changed')
+    for key,row in rows:
+        if row.get('project') is None:
+            require(dest==cfg['dashboard']['repo'] and unrouted_wiki_binding(cfg,key)==row['issue_binding'],
+                    'issue-binding-changed')
+        elif row.get('state')=='queued':
+            bound_issue(cfg,key,row)
+        else:
+            verify_saved_issue(cfg,key,row)
 
 
 def wiki_pages(cfg,state,visible,tabs,blocks,updates,metadata,guard):
     dash=cfg['dashboard']['repo']; name=cfg['name']; sign=cfg['publication']['signature']
     directory=private(state.root/'scratch'); writes={}
+    bound_rows={}
+    for key,row in visible.items():
+        try:
+            project=row.get('project')
+            source=key.split('#',1)[0]
+            if project is None and row.get('state')=='human' and set(row)=={'project','state'}:
+                bound=unrouted_wiki_binding(cfg,key)
+                if metadata.get(source,{}).get('id')==bound['source_repo_id']:
+                    bound_rows[key]=dict(row,issue_binding=bound)
+                continue
+            if row.get('state')=='queued' and set(row)=={'project','state'} and isinstance(project,str) and project in cfg['repositories']:
+                issue,_=verified_issue(cfg,key,project)
+                row=dict(row,issue_binding=issue_binding(cfg,key,project,issue.get('id')))
+                bound=saved_binding(cfg,key,row)
+            else:
+                bound=saved_binding(cfg,key,row)
+                verify_saved_issue(cfg,key,row)
+        except Blocked:
+            continue
+        if (metadata.get(source,{}).get('id')==bound['source_repo_id'] and
+                metadata.get(row['project'],{}).get('id')==bound['target_repo_id']):
+            bound_rows[key]=row
     destinations=[dash]+[r for r,p in cfg['repositories'].items() if p['kind']=='owned']
     for dest in destinations:
         meta=metadata.get(dest,{})
         if meta.get('has_wiki') is not True: continue
-        def visible_item(k,row):
-            return wiki_allows(cfg,metadata,dest,k.split('#',1)[0],row.get('project'))
-        allowed={k:r for k,r in visible.items() if visible_item(k,r)}
+        allowed={k:r for k,r in bound_rows.items() if (r['project'] is not None or dest==dash)
+                 and wiki_allows(cfg,metadata,dest,k.split('#',1)[0],r['project'])}
         whitelist_tabs=[[r for r in tab if r['issue'] in allowed] for tab in tabs]
         b=[x for x in blocks if '/' not in x]  # Health codes only; no private repo names.
         public=dashboard(allowed,[t for t in whitelist_tabs if t],b,stamp(),updates if dest==dash else [],sign)
@@ -1042,7 +1252,7 @@ def wiki_pages(cfg,state,visible,tabs,blocks,updates,metadata,guard):
             if dest==dash:
                 events=['# Manager operation log','']
                 for e in state.data['events']:
-                    if e['item'] in allowed or e['item'] is None:
+                    if e['item'] is None or (e['item'] in allowed and e.get('issue_binding')==allowed[e['item']]['issue_binding']):
                         events.append(f"- {e['at']} · {e['kind']}"+(f" · {link(e['item'])}" if e['item'] else ''))
                 writes[dest]['log']=publish_wiki(gh.git,wiki_url(dest),f'Manager-{name}-Log.md',
                     '\n'.join([*events,'',sign,'']),directory,before_push=pre_push)
@@ -1227,6 +1437,7 @@ def verify_review(gh,number,head,review_id):
               (r:=obj(line)).get('user_id')==reviewer and r.get('state') in ('APPROVED','CHANGES_REQUESTED','DISMISSED')]
     require(decisive and (decisive[-1].get('id'),decisive[-1].get('state'),decisive[-1].get('commit_id'))==
             (review_id,'APPROVED',head),'independent-review-superseded')
+    return review
 
 
 def owner_review(cfg,state,key,head,review_id):
@@ -1234,6 +1445,7 @@ def owner_review(cfg,state,key,head,review_id):
     require(type(row.get('pr')) is int and SHA.fullmatch(head) and review_id>0 and row.get('project') in cfg['repositories']
             and row.get('pr_base')==cfg['repositories'][row['project']]['base'] and row.get('pr_branch'),'tracked-pr-required')
     require(row.get('published_sha')==head,'unverified-pr-head')
+    verify_saved_issue(cfg,key,row)
     auth=identity(cfg,row['project'])
     latest=auth.pull_state(row['pr'],base=row['pr_base'],branch=row['pr_branch'],
                            required=cfg['repositories'][row['project']].get('trusted_checks',{}))
@@ -1536,8 +1748,9 @@ def main():
             s.add_argument('--nonce',required=True)
             s.add_argument('--profile-home',required=True,type=Path)
     s=sub.add_parser('publish',allow_abbrev=False); s.add_argument('issue'); s.add_argument('--reviewed-head',required=True)
-    s.add_argument('--authorize-disclosure')
-    s=sub.add_parser('disclosure-scope',allow_abbrev=False); s.add_argument('issue'); s.add_argument('--reviewed-head',required=True)
+    s.add_argument('--approval-request',type=Path); s.add_argument('--approval-signature',type=Path); s.add_argument('--recover-existing-ref',action='store_true')
+    s=sub.add_parser('publication-request',allow_abbrev=False); s.add_argument('issue'); s.add_argument('--reviewed-head',required=True)
+    s.add_argument('--recover-existing-ref',action='store_true')
     s=sub.add_parser('record-review',allow_abbrev=False); s.add_argument('issue'); s.add_argument('--head',required=True); s.add_argument('--review-id',type=int,required=True)
     s=sub.add_parser('sync',allow_abbrev=False); s.add_argument('skill',choices=(SELF,AGENT,PANE)); s.add_argument('--approved-head',required=True)
     s=sub.add_parser('capability-gap',allow_abbrev=False); s.add_argument('skill',choices=(SELF,AGENT,PANE)); s.add_argument('gap')
@@ -1550,7 +1763,7 @@ def main():
             require(a.profile_home.is_absolute() and (a.profile_home/'config.yaml').is_file(),'invalid-supervisor-profile')
             os.environ['HERMES_HOME']=str(a.profile_home.resolve())
         direct=a.op in ('capability-gap','publish','follow-up')
-        root=private(home()/'github-project-manager',create=not direct and a.op!='disclosure-scope')
+        root=private(home()/'github-project-manager',create=not direct and a.op!='publication-request')
         config=(a.config or root/'config.yaml').absolute()
         require(config.parent==root and trusted_path(config.parent,directory=True),'config-must-be-in-private-manager-directory')
         cfg=load_config(config)
@@ -1568,10 +1781,12 @@ def main():
             result={repo:project_label(repo) for repo in cfg['repositories']}
         elif a.op=='show':
             result=load_private(root/'last-pass.json')
-        elif a.op=='disclosure-scope':
+        elif a.op=='publication-request':
             data=load_private(root/'state.json')
             require(data.get('schema')==1 and data.get('name')==cfg['name'],'different-manager-already-bound-to-profile')
-            result=disclosure_scope(cfg,a.issue,data['items'].get(a.issue,{}),a.reviewed_head)
+            result={'message':approval_message(publication_scope(cfg,root,a.issue,data['items'].get(a.issue,{}),a.reviewed_head,
+                                                                 recover=a.recover_existing_ref)),
+                    'namespace':APPROVAL_NAMESPACE}
         else:
             guard=direct_command_guard(cfg,root,config) if direct else None
             with State(root,cfg['name'],guard=guard) as state:
@@ -1579,7 +1794,11 @@ def main():
                 elif a.op=='activate': result=activate(cfg,state)
                 elif a.op=='sync': result=sync_skill(cfg,state,a.skill,a.approved_head)
                 elif a.op=='capability-gap': result=gap(cfg,state,a.skill,a.gap,guard)
-                elif a.op=='publish': result=publish_item(cfg,state,a.issue,a.reviewed_head,guard,disclosure=a.authorize_disclosure)
+                elif a.op=='publish':
+                    require((a.approval_request is None)==(a.approval_signature is None),'operator-publication-approval-required')
+                    proof=({'message':read_bounded(a.approval_request),'signature':read_bounded(a.approval_signature)}
+                           if a.approval_request is not None else None)
+                    result=publish_item(cfg,state,a.issue,a.reviewed_head,guard,approval=proof,recover=a.recover_existing_ref)
                 elif a.op=='record-review': result=owner_review(cfg,state,a.issue,a.head,a.review_id)
                 elif a.op=='follow-up': result=follow_up(cfg,state,a.issue,sys.stdin.buffer.read(24001).decode('utf-8'),guard)
                 elif a.op=='retire-uncertain': result=retire_uncertain(cfg,state,a.issue)

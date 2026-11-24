@@ -236,7 +236,7 @@ class Contract(unittest.TestCase):
     def test_disk_pressure_after_checkout_or_provision_holds_and_keeps_evidence(self):
         m=self.manager()
         cfg={'health':{},'worker':{'model':'fixture-model','network':False},
-             'dashboard':{'repo':'org/console'},'repositories':{'org/repo':{'repo_id':17}}}
+             'dashboard':{'repo':'org/console'},'repositories':{'org/repo':{'repo_id':17,'kind':'owned'}}}
         key='org/repo#1'
         for after_provision in (False,True):
             with tempfile.TemporaryDirectory() as tmp, m.State(Path(tmp),'fixture') as state:
@@ -369,7 +369,7 @@ class Contract(unittest.TestCase):
 
     def test_existing_pr_does_not_erase_an_ambiguous_worker_attempt(self):
         m = self.manager()
-        with tempfile.TemporaryDirectory() as tmp, patch.object(m, 'identity') as auth:
+        with tempfile.TemporaryDirectory() as tmp, patch.object(m, 'identity') as auth, patch.object(m,'verify_saved_issue'):
             with m.State(Path(tmp), 'alpha') as state:
                 item = state.begin('org/console#1', 'org/project')
                 item['pr'] = 4
@@ -398,18 +398,40 @@ class Contract(unittest.TestCase):
         auth=gh.Identity('org/project',{'type':'gh','login':'owner'},'hermes/test',repo_id=22)
         head='a'*40; path='.github/workflows/ci.yml'; blob='b'*40
         policy={'tests':{'workflow_id':11,'path':path,'blob':blob}}
-        check={'name':'tests','head_sha':head,'status':'completed','conclusion':'success','suite_id':17,'app_slug':'github-actions'}
-        run={'id':30,'workflow_id':99,'path':path,'head_sha':head,'check_suite_id':17,'event':'push',
+        check={'id':18,'name':'tests','head_sha':head,'status':'completed','conclusion':'success','suite_id':17,'app_slug':'github-actions'}
+        run={'id':30,'run_number':10,'run_attempt':2,'workflow_id':99,'path':path,'head_sha':head,'check_suite_id':17,'event':'push',
              'head_branch':'main','repository':{'id':22},'head_repository':{'id':22},'status':'completed','conclusion':'success'}
+        runs=[run]
+        jobs={'total_count':1,'jobs':[{'run_id':30,'run_attempt':1,'name':'tests','head_sha':head,'head_branch':'main',
+             'status':'completed','conclusion':'success','check_run_url':'https://api.github.com/repos/org/project/check-runs/18'}]}
         def api(endpoint):
             if '/status' in endpoint: return {'sha':head,'total_count':0}
             if '/contents/' in endpoint: return {'sha':blob,'type':'file','path':path}
-            if '/actions/' in endpoint: return {'total_count':1,'workflow_runs':[run]}
+            if '/attempts/2/jobs?' in endpoint or '/attempts/3/jobs?' in endpoint: return jobs
+            if '/actions/' in endpoint: return {'total_count':len(runs),'workflow_runs':runs}
             return {'number':7,'head':{'sha':head},'state':'open','draft':False}
-        with patch.object(auth,'api',side_effect=api),patch.object(auth,'gh',return_value=json.dumps(check)):
+        checks=[check]
+        with patch.object(auth,'api',side_effect=api),patch.object(auth,'gh',side_effect=lambda *_:'\n'.join(map(json.dumps,checks))):
             self.assertNotEqual(auth.pull_state(7,required=policy)['checks'],'pass')
             run['workflow_id']=11
+            self.assertNotEqual(auth.pull_state(7,required=policy)['checks'],'pass')
+            jobs['jobs'][0]['run_attempt']=2
             self.assertEqual(auth.pull_state(7,required=policy)['checks'],'pass')
+            runs.append(dict(run,id=31,run_number=11,check_suite_id=19,status='queued',conclusion=None))
+            self.assertNotEqual(auth.pull_state(7,required=policy)['checks'],'pass')
+            runs[-1].update(status='completed',conclusion='success',run_attempt=3)
+            checks.append(dict(check,id=20,suite_id=19))
+            jobs['jobs'][0].update(run_id=31,check_run_url='https://api.github.com/repos/Org/Project/check-runs/20')
+            del jobs['jobs'][0]['run_attempt']
+            self.assertEqual(auth.pull_state(7,required=policy)['checks'],'pass')
+            runs.pop()
+            checks.pop()
+            jobs['jobs'][0].update(run_id=30,run_attempt=2,check_run_url='https://api.github.com/repos/org/project/check-runs/18')
+            jobs['jobs'][0]['check_run_url']=jobs['jobs'][0]['check_run_url'].replace('/18','/19')
+            self.assertNotEqual(auth.pull_state(7,required=policy)['checks'],'pass')
+            jobs['jobs'][0]['check_run_url']=jobs['jobs'][0]['check_run_url'].replace('/19','/18')
+            run['event']='pull_request'
+            self.assertNotEqual(auth.pull_state(7,required=policy)['checks'],'pass')
 
     def test_exact_head_approval_from_unpinned_actor_is_not_independent(self):
         m=self.manager()
@@ -445,7 +467,7 @@ class Contract(unittest.TestCase):
     def test_cross_repository_publication_without_exact_consent_never_reads_bundle(self):
         m=self.manager()
         key='org/console#7'; project='org/project'; head='a'*40
-        cfg={'dashboard':{'repo':'org/console','repo_id':11},'repositories':{project:{'repo_id':22,'base':'main'}}}
+        cfg={'name':'fixture','dashboard':{'repo':'org/console','repo_id':11},'repositories':{project:{'repo_id':22,'base':'main'}}}
         with tempfile.TemporaryDirectory() as tmp, m.State(Path(tmp),'fixture') as state:
             state.data['items'][key]={'project':project,'state':'waiting','checkout':'b'*16,
                 'issue_binding':{'source_repo_id':11,'target_repo_id':22,'issue_id':29}}
@@ -455,15 +477,15 @@ class Contract(unittest.TestCase):
                   patch.object(m,'bound_issue',return_value=({'id':29},[])),
                   patch.object(m,'import_bundle') as bundle):
                 row=state.data['items'][key]
-                with self.assertRaisesRegex(m.Blocked,'exact-disclosure-not-authorized'):
+                with self.assertRaisesRegex(m.Blocked,'operator-publication-approval-required'):
                     m.publish_item(cfg,state,key,head,lambda:None)
-                consent=m.disclosure_scope(cfg,key,row,head)
-                with self.assertRaisesRegex(m.Blocked,'exact-disclosure-not-authorized'):
-                    m.publish_item(cfg,state,key,'b'*40,lambda:None,disclosure=consent['authorization'])
-                row.update(state='uncertain',publish_sha=head,pending_disclosure=consent)
+                row.update(state='uncertain',publish_sha=head,publish_branch='hermes/fixture/'+'b'*16,
+                           pending_disclosure={'authorization':'legacy-digest'})
+                with self.assertRaisesRegex(m.Blocked,'operator-publication-approval-required'):
+                    m.publish_item(cfg,state,key,head,lambda:None)
                 target.canonical_repo.return_value={'id':22,'private':True,'visibility':'private'}
-                with self.assertRaisesRegex(m.Blocked,'exact-disclosure-not-authorized'):
-                    m.publish_item(cfg,state,key,head,lambda:None)
+                with self.assertRaisesRegex(m.Blocked,'publication-target-audience-unverified'):
+                    m.publish_item(cfg,state,key,head,lambda:None,approval={'message':'x','signature':'y'})
                 bundle.assert_not_called()
                 target.git.assert_not_called()
                 target.gh.assert_not_called()
@@ -476,6 +498,38 @@ class Contract(unittest.TestCase):
         self.assertNotIn('private-dash', title + body)
         self.assertNotIn('#12', title + body)
         self.assertIn('#12', auth.pr_text('org/project#12', 'a' * 40)[1])
+
+    def test_operator_signature_required_even_for_same_repository(self):
+        m=self.manager()
+        project='org/project'; key=f'{project}#7'; head='a'*40
+        cfg={'repositories':{project:{}},'name':'fixture'}
+        with tempfile.TemporaryDirectory() as tmp,m.State(Path(tmp),'fixture') as state:
+            state.data['items'][key]={'project':project,'state':'waiting','checkout':'b'*16}
+            with patch.object(m,'bound_issue'),patch.object(m,'import_bundle') as bundle:
+                with self.assertRaisesRegex(m.Blocked,'operator-publication-approval-required'):
+                    m.publish_item(cfg,state,key,head,lambda:None)
+                bundle.assert_not_called()
+
+    def test_signature_cannot_authorize_a_different_commit_or_a_later_publication(self):
+        m=self.manager()
+        scope={'head':'a'*40,'target':'org/project','target_visibility':'public'}
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); approved=root/'approved'; unknown=root/'unknown'; now=1735689600
+            for private_key in (approved,unknown):
+                m.call(['/usr/bin/ssh-keygen','-q','-t','ed25519','-N','','-f',str(private_key)])
+            public_key=(root/'approved.pub').read_text().strip().split()[:2]
+            message=m.approval_message(scope,now=now)
+            def sign(private_key):
+                return m.call(['/usr/bin/ssh-keygen','-Y','sign','-f',str(private_key),'-n',m.APPROVAL_NAMESPACE],data=message)
+            signed=sign(approved); stranger=sign(unknown)
+            with patch.object(m,'operator_public_key',return_value=' '.join(public_key)):
+                m.verify_publication_approval(root,scope,{'message':message,'signature':signed},now=now)
+                with self.assertRaisesRegex(m.Blocked,'invalid-operator-publication-signature'):
+                    m.verify_publication_approval(root,scope,{'message':message,'signature':stranger},now=now)
+                with self.assertRaisesRegex(m.Blocked,'publication-approval-scope-changed'):
+                    m.verify_publication_approval(root,dict(scope,head='b'*40),{'message':message,'signature':signed},now=now)
+                with self.assertRaisesRegex(m.Blocked,'publication-approval-expired'):
+                    m.verify_publication_approval(root,scope,{'message':message,'signature':signed},now=now+3600)
 
     def test_recovering_advance_distinguishes_unchanged_prior_head(self):
         m=self.manager()
@@ -492,14 +546,191 @@ class Contract(unittest.TestCase):
                 self.assertTrue(kwargs['require_open'])
                 return 4
             auth.existing_pr.side_effect=lookup
-            with (patch.object(m,'identity',return_value=auth), patch.object(m,'bound_issue'),
+            with (patch.object(m,'identity',return_value=auth), patch.object(m,'publication_scope',return_value={'base_sha':'a'*40}),
+                  patch.object(m,'verify_publication_approval'),
                   patch.object(m,'import_bundle',side_effect=m.Blocked('resume-reached-bundle')) as bundle,
                   patch.object(m,'call',return_value='a'*40)):
                 with self.assertRaisesRegex(m.Blocked,'resume-reached-bundle'):
-                    m.publish_item(cfg,state,key,expected,lambda:None)
+                    m.publish_item(cfg,state,key,expected,lambda:None,approval={'message':'x','signature':'y'})
                 bundle.assert_called_once()
                 auth.push_pr.assert_not_called()
                 self.assertEqual(row['published_sha'],prior)
+
+    def test_replaced_repository_cannot_reconcile_saved_pull_request(self):
+        m=self.manager()
+        project='org/project'; key=f'{project}#7'; head='a'*40
+        cfg={'dashboard':{'repo':'org/console','repo_id':10},'repositories':{project:{'repo_id':21,'base':'main','kind':'owned'}}}
+        with tempfile.TemporaryDirectory() as tmp,m.State(Path(tmp),'fixture') as state:
+            row=state.data['items'][key]={'project':project,'state':'human','pr':4,'checks':'pass',
+                'published_sha':head,'issue_binding':{'source_repo_id':20,'target_repo_id':20,'issue_id':33}}
+            with patch.object(m,'identity') as identity:
+                identity.return_value.pull_state.return_value={'head':head,'state':'working','checks':'pass','draft':False}
+                m.reconcile(cfg,state,Mock())
+                identity.assert_not_called()
+            self.assertEqual(row['hold'],'issue-binding-changed')
+            self.assertNotIn('checks',row)
+            self.assertNotEqual(row['state'],'human')
+
+    def test_verified_push_can_resume_pr_creation_without_worker_checkout(self):
+        m=self.manager()
+        project='org/project'; key=f'{project}#7'; branch='hermes/fixture/'+'b'*16
+        head='a'*40; base='c'*40; ref=f'refs/heads/{branch}'
+        cfg={'name':'fixture','repositories':{project:{'base':'main'}}}
+        proof={'message':'x','signature':'y'}
+        with tempfile.TemporaryDirectory() as tmp,m.State(Path(tmp),'fixture') as state:
+            row=state.data['items'][key]={'project':project,'state':'uncertain','checkout':'d'*16,
+                                         'publish_branch':branch,'publish_sha':head,'pending_approval':proof}
+            auth=Mock()
+            auth.git.return_value=f'{head}\t{ref}'
+            auth.existing_pr.return_value=None
+            auth.push_pr.return_value=4
+            with (patch.object(m,'identity',return_value=auth),
+                  patch.object(m,'publication_scope',return_value={'base_sha':base,'branch':branch}),
+                  patch.object(m,'verify_publication_approval') as verify,patch.object(m,'import_bundle') as bundle):
+                with self.assertRaisesRegex(m.Blocked,'recovery-approval-required'):
+                    m.publish_item(cfg,state,key,head,lambda:None)
+                auth.push_pr.assert_not_called()
+                row['push_confirmed']=True
+                self.assertEqual(m.publish_item(cfg,state,key,head,lambda:None)['pr'],4)
+            self.assertIsNone(auth.push_pr.call_args.args[0])
+            self.assertTrue(auth.push_pr.call_args.kwargs['resume'])
+            verify.assert_called()
+            bundle.assert_not_called()
+
+    def test_confirmed_push_does_not_adopt_unexpected_pr(self):
+        m=self.manager(); project='org/project'; key=f'{project}#7'
+        head='a'*40; branch='hermes/fixture/'+'b'*16
+        cfg={'name':'fixture','repositories':{project:{'base':'main'}}}
+        with tempfile.TemporaryDirectory() as tmp,m.State(Path(tmp),'fixture') as state:
+            row=state.data['items'][key]={'project':project,'state':'uncertain','checkout':'c'*16,
+                 'publish_branch':branch,'publish_sha':head,'push_confirmed':True,
+                 'pending_approval':{'message':'old','signature':'old'}}
+            auth=Mock(); auth.git.return_value=f'{head}\trefs/heads/{branch}'; auth.existing_pr.return_value=17
+            scope={'base_sha':'d'*40,'recovery_pr':17,'title':'Example','body':'Review this.'}
+            with (patch.object(m,'identity',return_value=auth),
+                  patch.object(m,'publication_scope',return_value=scope),patch.object(m,'verify_publication_approval')):
+                with self.assertRaisesRegex(m.Blocked,'recovery-approval-required'):
+                    m.publish_item(cfg,state,key,head,lambda:None)
+                self.assertNotIn('pr',row)
+                proof={'message':'new','signature':'new'}
+                self.assertEqual(m.publish_item(cfg,state,key,head,lambda:None,approval=proof,recover=True)['pr'],17)
+            self.assertEqual(row['publication_approval_sha256'],m.hashlib.sha256(b'new').hexdigest())
+            auth.push_pr.assert_not_called()
+
+    def test_advance_requires_the_signed_pr_number(self):
+        self.manager()
+        gh=importlib.import_module('github_io')
+        auth=gh.Identity('org/project',{'type':'gh','login':'fixture'},'hermes/fixture')
+        branch='hermes/fixture/'+'a'*16; prior='b'*40; head='c'*40
+        def fake_git(argv,**kwargs):
+            return prior if 'merge-base' in argv else f'{prior}\trefs/heads/{branch}'
+        with (patch.object(auth,'check_pr_target'),patch.object(auth,'verify'),
+              patch.object(auth,'git',side_effect=fake_git) as git,
+              patch.object(auth,'existing_pr',side_effect=[18,19])):
+            with self.assertRaisesRegex(gh.Blocked,'previous-publication-not-verified'):
+                auth.push_pr(Path('/fixture'),branch,'main','org/project#7',head,prior,previous_pr=18,
+                             before_write=lambda:None,final_guard=lambda:None,resume=False,
+                             before_push=lambda:None,after_push=lambda:None)
+            self.assertFalse(any('push' in c.args[0] for c in git.call_args_list))
+
+    def test_ref_conflict_before_push_does_not_create_recovery_authority(self):
+        m=self.manager()
+        key='org/project#7'; project='org/project'; checkout='b'*16
+        head='a'*40; base='c'*40
+        cfg={'name':'fixture','repositories':{project:{'base':'main'}}}
+        with tempfile.TemporaryDirectory() as tmp,m.State(Path(tmp),'fixture') as state:
+            (state.root/'work'/checkout).mkdir(parents=True)
+            row=state.data['items'][key]={'state':'waiting','project':project,'checkout':checkout,'base_sha':base}
+            auth=Mock()
+            auth.git.return_value=f'{base}\trefs/heads/main'
+            auth.push_pr.side_effect=m.Blocked('remote-branch-conflict')
+            with (patch.object(m,'identity',return_value=auth),patch.object(m,'call',return_value=base),
+                  patch.object(m,'publication_scope',return_value={'base_sha':base}),
+                  patch.object(m,'verify_publication_approval'),patch.object(m,'import_bundle')):
+                with self.assertRaisesRegex(m.Blocked,'remote-branch-conflict'):
+                    m.publish_item(cfg,state,key,head,lambda:None,approval={'message':'x','signature':'y'})
+            self.assertEqual(row['state'],'waiting')
+            self.assertNotIn('publish_sha',row)
+
+    def test_replaced_repository_cannot_publish_saved_wiki_row_or_log(self):
+        m=self.manager()
+        project='org/project'; key=f'{project}#7'; dash='org/console'
+        cfg={'name':'fixture','publication':{'signature':'hermes/fixture'},'dashboard':{'repo':dash,'repo_id':10},
+             'repositories':{project:{'repo_id':21,'kind':'owned'}}}
+        metadata={repo:{'id':id_,'has_wiki':True,'private':False,'visibility':'public'} for repo,id_ in ((project,21),(dash,10))}
+        with tempfile.TemporaryDirectory() as tmp,m.State(Path(tmp),'fixture') as state:
+            items={key:{'project':project,'state':'queued',
+                        'issue_binding':{'source_repo_id':20,'target_repo_id':20,'issue_id':33}}}
+            state.data['events']=[{'kind':'started','at':'2026-01-01T00:00:00Z','item':key}]
+            with patch.object(m,'identity'),patch.object(m,'publish_wiki',return_value={'status':'published'}) as write:
+                m.wiki_pages(cfg,state,items,[],[],[],metadata,lambda:None)
+                self.assertEqual(len(write.call_args_list),3)
+                for call in write.call_args_list:
+                    self.assertNotIn(key,call.args[3])
+                    self.assertNotIn('/issues/7',call.args[3])
+
+    def test_wiki_shows_verified_queue_without_linking_legacy_events(self):
+        m=self.manager()
+        project='org/project'; key=f'{project}#7'; dash='org/console'
+        cfg={'name':'fixture','publication':{'signature':'hermes/fixture'},'dashboard':{'repo':dash,'repo_id':10},
+             'repositories':{project:{'repo_id':21,'kind':'owned'}}}
+        metadata={repo:{'id':id_,'has_wiki':True,'private':False,'visibility':'public'} for repo,id_ in ((project,21),(dash,10))}
+        with tempfile.TemporaryDirectory() as tmp,m.State(Path(tmp),'fixture') as state:
+            items={key:{'project':project,'state':'queued'}}
+            state.data['events']=[{'kind':'started','at':'2026-01-01T00:00:00Z','item':key}]
+            with (patch.object(m,'identity'),patch.object(m,'verified_issue',return_value=({'id':29},[])),
+                  patch.object(m,'publish_wiki',side_effect=lambda *a,**k:{'status':'published'}) as write):
+                m.wiki_pages(cfg,state,items,[],[],[],metadata,lambda:None)
+                pages={c.args[2]:c.args[3] for c in write.call_args_list}
+                self.assertIn(key,pages['Manager-fixture.md'])
+                self.assertNotIn(key,pages['Manager-fixture-Log.md'])
+
+    def test_wiki_rechecks_route_of_queued_issue_before_push(self):
+        m=self.manager(); project='org/project'; key=f'{project}#7'; dash='org/console'
+        cfg={'name':'fixture','publication':{'signature':'hermes/fixture'},'dashboard':{'repo':dash,'repo_id':10},
+             'repositories':{project:{'repo_id':21,'kind':'owned'}}}
+        metadata={repo:{'id':i,'has_wiki':True,'private':False,'visibility':'public'} for repo,i in ((project,21),(dash,10))}
+        with tempfile.TemporaryDirectory() as tmp,m.State(Path(tmp),'fixture') as state:
+            auths={repo:Mock() for repo in metadata}
+            for repo in auths:
+                auths[repo].canonical_repo.return_value=metadata[repo]
+                auths[repo].issue_record.return_value={'id':29,'state':'closed'}
+            that_check=[({'id':29},[]),m.Blocked('issue-route-changed'),m.Blocked('issue-route-changed')]
+            pushed=[]
+            def publish(_git,url,page,content,_scratch,before_push):
+                before_push(); pushed.append((url,page))
+                return {'status':'published'}
+            with (patch.object(m,'identity',side_effect=lambda _,repo:auths[repo]),
+                  patch.object(m,'verified_issue',side_effect=that_check),
+                  patch.object(m,'publish_wiki',side_effect=publish)):
+                m.wiki_pages(cfg,state,{key:{'project':project,'state':'queued'}},[],[],[],metadata,lambda:None)
+            self.assertEqual(pushed,[])
+
+    def test_wiki_omits_changed_live_issue_but_keeps_unrouted_dashboard_issue(self):
+        m=self.manager()
+        project='org/project'; dash='org/console'; stale=f'{project}#7'; unrouted=f'{dash}#8'
+        cfg={'name':'fixture','publication':{'signature':'hermes/fixture'},'dashboard':{'repo':dash,'repo_id':10},
+             'repositories':{project:{'repo_id':21,'kind':'owned'}}}
+        metadata={repo:{'id':id_,'has_wiki':True,'private':False,'visibility':'public'} for repo,id_ in ((project,21),(dash,10))}
+        items={stale:{'project':project,'state':'waiting',
+                      'issue_binding':{'source_repo_id':21,'target_repo_id':21,'issue_id':29}},
+               unrouted:{'project':None,'state':'human'}}
+        with tempfile.TemporaryDirectory() as tmp,m.State(Path(tmp),'fixture') as state:
+            source=Mock(); source.issue_record.return_value={'id':45,'title':'Needs a target',
+                'state':'open','labels':[{'name':'hermes:fixture'}]}
+            target=Mock(); target.issue_record.return_value={'id':46}
+            pages={}
+            def publish(_git,url,page,content,_scratch,before_push):
+                before_push(); pages[url,page]=content
+                return {'status':'published'}
+            source.canonical_repo.return_value=metadata[dash]
+            target.canonical_repo.return_value=metadata[project]
+            with (patch.object(m,'identity',side_effect=lambda cfg,repo:{dash:source,project:target}[repo]),
+                  patch.object(m,'publish_wiki',side_effect=publish)):
+                m.wiki_pages(cfg,state,items,[],[],[],metadata,lambda:None)
+            self.assertIn(unrouted,pages[m.wiki_url(dash),'Manager-fixture.md'])
+            self.assertNotIn(unrouted,pages[m.wiki_url(project),'Manager-fixture.md'])
+            self.assertFalse(any(stale in page for page in pages.values()))
 
     def test_route_can_be_repaired_before_first_attempt(self):
         m = self.manager()
@@ -532,7 +763,7 @@ class Contract(unittest.TestCase):
     def test_dismissed_review_cannot_restore_human_ready(self):
         m = self.manager()
         sha = 'a' * 40
-        with tempfile.TemporaryDirectory() as tmp, patch.object(m,'identity') as identity:
+        with tempfile.TemporaryDirectory() as tmp, patch.object(m,'identity') as identity, patch.object(m,'verify_saved_issue'):
             with m.State(Path(tmp),'alpha') as state:
                 row=state.begin('org/project#1','org/project')
                 row.update(state='human',pr=6,review_id=11,reviewed_head=sha,published_sha=sha)
@@ -549,7 +780,7 @@ class Contract(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, m.State(Path(tmp),'alpha') as state:
             row = state.begin('org/project#1','org/project')
             row.update(state='human',pr=6,published_sha=published,reviewed_head=advanced,review_id=11)
-            with patch.object(m,'identity') as auth, patch.object(m,'verify_review') as review:
+            with patch.object(m,'identity') as auth, patch.object(m,'verify_review') as review, patch.object(m,'verify_saved_issue'):
                 auth.return_value.pull_state.return_value = {'head':advanced,'checks':'pass','state':'working','draft':False}
                 m.reconcile({},state,Mock())
                 review.assert_not_called()
@@ -733,7 +964,7 @@ class Contract(unittest.TestCase):
 
     def test_publish_rechecks_at_each_github_write(self):
         m = self.manager()
-        for phase in ('bundle','push','pr create','permitted'):
+        for phase in ('bundle','push','push journal','push expiry','no-op','pr create','pr ref','pr journal','pr expiry','foreign pr','permitted'):
             with self.subTest(phase=phase), self.direct_command_profile() as (root,cfg,_,_):
                 gh = importlib.import_module('github_io')
                 project = cfg['updates'][m.SELF]
@@ -743,17 +974,27 @@ class Contract(unittest.TestCase):
                 with m.State(root,cfg['name']) as state:
                     state.data['items'][key] = {'project':project,'state':'waiting','base_sha':base,'checkout':checkout}
                     state.save()
+                request=root/'request.json'; signature=root/'request.sig'
+                for path in (request,signature):
+                    path.touch(mode=0o600); path.write_text('fixture')
+                request.write_text(m.approval_message({}))
                 auth = gh.Identity(project,{'type':'gh','login':'fixture'},'hermes/fixture')
                 writes = []
+                pushed_head_reads=[]
 
                 def git(args,**kwargs):
                     if args[0]=='ls-remote':
                         ref = args[-1]
                         if ref=='refs/heads/main':
                             return f'{base}\t{ref}'
+                        if 'push' in writes:
+                            pushed_head_reads.append(ref)
+                            if len(pushed_head_reads)==2: disarm_at('pr ref')
                         return f'{expected}\t{ref}' if 'push' in writes else ''
                     if args[2]=='push':
                         writes.append('push')
+                        if phase=='no-op': return f'=\t{args[-1]}\t[up to date]\nDone\n'
+                        return f'*\t{args[-1]}\t[new branch]\nDone\n'
                     return ''
 
                 def github(args,**kwargs):
@@ -764,18 +1005,59 @@ class Contract(unittest.TestCase):
                     if phase==point:
                         (root/'activation.json').unlink()
 
-                with (patch.object(m,'identity',return_value=auth), patch.object(m,'bound_issue'),
+                def existing(*a,**k):
+                    if phase=='foreign pr' and len(pushed_head_reads)==2:
+                        return 91
+                    return 7 if 'pr create' in writes else None
+
+                event=m.State.event
+                clock=[m.time.time()]
+                expire_during_guard=[]
+                def journal(state,kind,item=None):
+                    event(state,kind,item)
+                    if kind in ('publication-started','pr-creation-started'):
+                        disarm_at('push journal' if kind=='publication-started' else 'pr journal')
+                        if phase==('push expiry' if kind=='publication-started' else 'pr expiry'):
+                            expire_during_guard.append(True)
+                real_guard=m.direct_command_guard
+                def guard_factory(*a,**k):
+                    validate=real_guard(*a,**k)
+                    def guard():
+                        validate()
+                        if expire_during_guard:
+                            expire_during_guard.pop()
+                            clock[0]+=m.APPROVAL_LIFETIME
+                    return guard
+                fake_time=Mock(wraps=m.time)
+                fake_time.time.side_effect=lambda:clock[0]
+
+                with (patch.object(m,'identity',return_value=auth), patch.object(m,'publication_scope',return_value={'base_sha':base}),
+                      patch.object(m,'verify_publication_approval'),
                       patch.object(m,'call',return_value=base),
                       patch.object(m,'import_bundle',side_effect=lambda *a: disarm_at('bundle')),
                       patch.object(auth,'check_pr_target') as target, patch.object(auth,'verify') as verify,
-                      patch.object(auth,'existing_pr',side_effect=lambda *a,**k: 7 if 'pr create' in writes else None),
+                      patch.object(auth,'existing_pr',side_effect=existing),patch.object(m.State,'event',journal),
+                      patch.object(m,'time',fake_time),patch.object(m,'direct_command_guard',side_effect=guard_factory),
                       patch.object(auth,'git',side_effect=git), patch.object(auth,'gh',side_effect=github)):
                     target.side_effect = lambda *a: disarm_at('push') if target.call_count==2 else None
                     verify.side_effect = lambda: disarm_at('pr create') if verify.call_count==2 else None
-                    code,result = self.run_direct_command('publish',key,'--reviewed-head',expected)
+                    code,result = self.run_direct_command('publish',key,'--reviewed-head',expected,
+                                                          '--approval-request',str(request),'--approval-signature',str(signature))
                 self.assertEqual((code,result['ok']), (0,True) if phase=='permitted' else (1,False))
-                expected_writes = {'bundle':[],'push':[],'pr create':['push'],'permitted':['push','pr create']}
+                expected_writes = {'bundle':[],'push':[],'push journal':[],'push expiry':[],'no-op':['push'],'pr create':['push'],
+                                   'pr ref':['push'],'pr journal':['push'],'pr expiry':['push'],
+                                   'foreign pr':['push'],'permitted':['push','pr create']}
                 self.assertEqual(writes,expected_writes[phase])
+                if phase in ('no-op','pr ref'):
+                    row=m.load_private(root/'state.json')['items'][key]
+                    self.assertEqual(row['state'],'uncertain')
+                    self.assertIs(row.get('push_confirmed') is True,phase=='pr ref')
+                if phase in ('push journal','push expiry','pr journal','pr expiry','foreign pr'):
+                    row=m.load_private(root/'state.json')['items'][key]
+                    self.assertNotIn('pr_create_attempted',row)
+                    if phase in ('push journal','push expiry'):
+                        self.assertEqual(row['state'],'waiting')
+                        self.assertNotIn('publish_sha',row)
 
     def test_capability_gap_rechecks_after_preflight_for_label_and_issue(self):
         m = self.manager()
@@ -971,13 +1253,25 @@ class Contract(unittest.TestCase):
                     m.sync_candidate(cfg,state,m.AGENT,expected,Mock())
                 self.assertEqual(git(path,'rev-parse','HEAD'),old)
                 pr={'number':7,'merge_commit_sha':expected,'merged_at':'2026-01-01T01:00:00Z',
-                    'base':{'ref':'main','repo':{'id':37}},'head':{'sha':expected},
+                    'base':{'ref':'main','sha':old,'repo':{'id':37}},'head':{'sha':expected},
                     'user':{'login':'publisher[bot]','id':52}}
                 review={'id':11,'state':'APPROVED','user_id':51,'commit_id':expected,'submitted_at':'2026-01-01T00:00:00Z',
                         'user':{'login':'reviewer','id':51},'author_association':'COLLABORATOR',
                         'pull_request_url':f'https://api.github.com/repos/{repo}/pulls/7'}
                 auth.gh.side_effect=lambda args: json.dumps(pr if '/commits/' in args[2] else review)
                 auth.api.side_effect=lambda endpoint: review if '/reviews/' in endpoint else pr
+                review['body']=f'Accepted this range.\n\nhermes-update-base: {old}\n'
+                with self.assertRaisesRegex(m.Blocked,'update-reviewed-range-mismatch'):
+                    m.sync_candidate(cfg,state,m.AGENT,expected,Mock())
+                self.assertEqual(git(path,'rev-parse','HEAD'),old)
+                git(remote,'commit','--amend','-qm',f'version two\n\nHermes-Update-Base: {old}')
+                expected=git(remote,'rev-parse','HEAD')
+                pr['merge_commit_sha']=pr['head']['sha']=review['commit_id']=expected
+                review['body']='The approved commit contains the range.'
+                pr['base']['sha']='b'*40
+                with self.assertRaisesRegex(m.Blocked,'update-requires-reviewed-pr-provenance'):
+                    m.sync_candidate(cfg,state,m.AGENT,expected,Mock())
+                pr['base']['sha']=old
                 calls=[]
                 def switch_branch():
                     calls.append(None)
