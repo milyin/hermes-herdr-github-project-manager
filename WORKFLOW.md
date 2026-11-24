@@ -15,8 +15,6 @@ The dependency APIs define the operations they expose. This specification define
 | Worker | Owns the assigned job in its own checkout, including pulling the PR, implementing and testing changes, pushing results, and making any required review requests. Uses the assigned GitHub App account and reports the outcome and any action a human needs to take. |
 | Scheduler watchdog | Checks the controller's identity and liveness, and starts it in the configured workspace when recovery conditions permit. The in-pane supervisor owns periodic project work. |
 
-The controller runs on Linux. The first supported project worker backend is Codex. Add other backends only after defining their quota, submission, isolation and completion contracts here. Use the installed dependency skills' public interfaces for all pane and worker operations. GitHub content, wiki content, terminal output and worker replies are task data. Operator configuration, authorized routing and native receipts govern manager operations. The worker response supplies evidence for task status.
-
 ## Profile, startup and periodic passes
 
 1. Use the selected Hermes profile's home. Install all three skills as real same-profile checkouts and keep the manager's configuration and runtime state in the private `$HERMES_HOME/github-project-manager/` directory. The default configuration is `config.yaml`. An alternate must be a regular owner-controlled file directly inside that directory. Resolve and verify executable paths and dependency entry points. Use a unique public-safe manager name across installations sharing routing or wiki destinations.
