@@ -34,7 +34,7 @@ Each pane ID is scoped to the selected profile's Herdr workspace and saved pane 
 
 ## Named parameters
 
-The Hermes command accepts repeated named values for worker prompt templates.
+The Hermes command accepts repeated named values declared in the worker's settings. Supply a value for each parameter declared as `null` and override scalar defaults as needed. A command cannot declare a new parameter.
 
 ```text
 /project-manager run NAME --param KEY=VALUE [--param KEY=VALUE ...] [-- PROMPT]
@@ -58,7 +58,7 @@ Each `--param` takes one `KEY=VALUE` token. Quote the whole token with double qu
 
 | Command | Information returned |
 | --- | --- |
-| `/project-manager workers` | Configured worker names, descriptions, agent, model and accepted template parameter names. Shows which parameters still need values for a run. |
+| `/project-manager workers` | Configured worker names, descriptions, agent, model and declared template parameters. Shows which parameters require a value for a run. |
 | `/project-manager panes [FILTER ...]` | Workspace ID and matching managed pane records. Each record includes `pane_id`, `role`, `worker` when relevant, `suffix`, `presence`, `lock`, effective `state`, latest local `turn_id`, `completed_at` when known, and `delivery`. |
 | `/project-manager capacity` | Maximum working panes, occupied places, available places, and the pane IDs or unresolved launches counted against the limit. |
 | `/project-manager quota [--worker NAME]` | For all configured Codex accounts or the account used by the named worker, show the associated workers, window usage, elapsed allowance, reset, observation time and reason for any hold. A worker without a Codex quota check reports that quota is inapplicable. |

@@ -34,8 +34,10 @@ skills:
           description: Implement issues and address PR feedback
           prompt_file: skills/hermes-herdr-github-project-manager/doc/IMPLEMENTER_PROMPT.md
           parameters:
+            REPO: null
             ISSUE: none
             PR: none
+            TASK: null
         - name: reviewer
           agent: codex
           model: YOUR_CODEX_MODEL
@@ -43,6 +45,11 @@ skills:
           github_identity: milyin-hermes
           description: Review the exact PR head and report findings
           prompt_file: skills/hermes-herdr-github-project-manager/doc/REVIEWER_PROMPT.md
+          parameters:
+            REPO: null
+            ISSUE: null
+            PR: null
+            HEAD: null
 ```
 
 - Each worker has a unique `name`, an `agent` supported by Herdr agent manager, a `model`, an existing absolute `working_directory`, a `github_identity`, a `description`, and a `prompt_file`. Use lowercase letters, digits and hyphens in worker names.
@@ -53,8 +60,8 @@ skills:
 
 ## Prompt files
 
-Resolve a relative `prompt_file` path from the Hermes profile directory. Render `{{KEY}}` from the record's optional `parameters` mapping. Keys are case-sensitive identifiers made of letters, digits and underscores and must start with a letter or underscore. Substitute scalar values as text.
+Resolve a relative `prompt_file` path from the Hermes profile directory. Declare every `{{KEY}}` used by a prompt in that record's `parameters` mapping. Keys are case-sensitive identifiers made of letters, digits and underscores and must start with a letter or underscore. Validate templates against their declarations before opening panes or using changed settings. An undeclared or malformed reference is a configuration error. Report the record, prompt file and reference.
 
-Manager parameters come from the manager record. All of them must resolve before the manager starts. For a worker, use the values in its `parameters` mapping as defaults. [Named parameters on `run`](COMMANDS.md#named-parameters) override those defaults for that invocation. An explicit empty value counts as supplied. A named argument may supply only a key used in the selected worker's template. Reject duplicate or unknown arguments. Report the worker and key if a referenced value is missing or invalid, before creating a pane. This lets a worker require task-specific values without making them profile setup requirements.
+Set each manager parameter to its value in the profile. For a worker, a scalar value sets the default and `null` declares a required input without a default. [Named parameters on `run`](COMMANDS.md#named-parameters) supply required values or override defaults for that run. An explicit empty string counts as supplied. Accept only declared keys used in the selected worker's template. Reject duplicate or unknown arguments. If a required input has no value, report the worker and key before creating its pane.
 
-Validate the records and template files before starting panes. Resolve worker parameters on each run and append any literal task text after rendering. Substitute template values once. Task text, result messages, and follow-up prompts stay literal. A follow-up uses the saved worker session. The manager receives its rendered prompt and the configured worker names and descriptions on each scheduled turn, including when receiving a worker result.
+Resolve worker parameters on each run and substitute their values as text in one pass. Append any literal task text after rendering. Result messages and follow-up prompts stay literal. A follow-up uses the saved worker session. The manager receives its rendered prompt and the configured worker names and descriptions on each scheduled turn, including when receiving a worker result.
