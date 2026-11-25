@@ -58,17 +58,21 @@ The rule is fixed for each current window. The usage allowance equals the fracti
 
 ## Dependency skill requirements
 
-These contracts define what the project manager requires of both skills. Changes needed to provide them belong in the respective dependency.
+Use the skills' public caller APIs. The project manager owns pane roles, result delivery, and the rule that a zoom-locked pane counts as working.
 
 ### Herdr pane manager
 
-- Discover and create a workspace in an exact local Herdr instance. Return server-issued workspace and pane IDs. Provide a scoped layout with pane IDs, labels and verified zoom-lock state.
-- Create a pane with a literal argument vector, working directory and suffix. Return the new pane's identity and distinguish a refused creation from an uncertain one.
-- Rename and close only the exact pane in the specified workspace. Preserve the pane ID prefix on rename. Check current pane and tab locks before mutation and refuse when the applicable lock is set or unverified. Return verifiable results for rename and closure.
+The pane manager supplies workspace and pane identity, layout, and guarded mutations. [Herdr pane manager skill](https://github.com/milyin/hermes-herdr-pane-manager) · [Caller API](https://github.com/milyin/hermes-herdr-pane-manager/blob/main/references/api.md)
+
+- Use `workspaces` and `workspace-create` in the configured local Herdr instance. Use `layout` and `lock-status` to verify workspace, pane IDs, labels, and zoom state.
+- Use `create --argv` with the working directory and suffix to launch the pane. Retain any pane ID from a partial or uncertain creation for reconciliation.
+- Use `rename` to set a suffix while preserving the pane ID prefix. Use `close` on the exact bound pane. Respect `user_locked` and `lock_unknown`, and `tab_user_locked` when closing a sibling in a zoomed tab. Use the verified layout and mutation receipts to confirm the result.
 
 ### Herdr agent manager
 
-- Provision the requested agent backend and model in the configured working directory, using the pane manager for pane operations. Bind Git and GitHub authentication to the requested App identity. Refuse when that identity cannot be supplied. Keep credentials out of prompts and receipts.
-- Observe the bound agent's native state and retrieve a terminal result for the exact thread and turn. Distinguish a running turn, confirmed completion or interruption, and an unknown outcome. Support observation without starting a turn.
-- Submit an initial prompt to the verified pane. Bind follow-ups to that pane's saved thread and prior turn. Reject a busy or locked target, and return a verified submission receipt without waiting for completion. Distinguish a definitive refusal from an unknown outcome. Provide the same verified idle-only admission for the manager's Hermes session.
-- Read fresh Codex quota windows associated with the account used by that worker, including remaining usage, window duration and reset time. Report when the account or readings cannot be verified. The project manager uses those readings for pacing.
+The agent manager supplies Codex and Hermes sessions, native turn operations, and Codex quota readings. [Herdr agent manager skill](https://github.com/milyin/hermes-herdr-agent-manager) · [Caller API](https://github.com/milyin/hermes-herdr-agent-manager/blob/main/references/api.md)
+
+- Use `provision` with the backend and working directory, and `run --model` with the selected model. Require per-pane Git and GitHub authentication bound to the requested App identity. Refuse when the identity cannot be supplied. Keep credentials out of prompts and receipts.
+- Use `wait` with the exact known turn ID to observe completion. Require a way to verify the bound session's idle or busy state even before its first turn. Preserve a result correlated to the exact thread and turn before another turn can replace it. Distinguish confirmed failure or interruption from an unknown outcome.
+- Use idle `steer` bound with `--thread-id` and `--after-turn-id`. Initial and follow-up submissions must enforce idle and lock checks and return a verifiable admission receipt independently of completion. A receipt for a Hermes manager turn must identify the admission into the bound conversation where the result or periodic prompt is delivered. Distinguish a definitive refusal from an unknown outcome.
+- Use `get-remaining-tokens --agent codex` for remaining percentage, window duration, and reset time. Verify that readings and submissions refer to the same Codex account. Report unavailable or unverified observations so the project manager can hold the affected work.
