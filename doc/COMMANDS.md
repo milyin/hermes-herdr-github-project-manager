@@ -28,13 +28,13 @@ Pane preparation and `tick` are available through the operator commands and cron
 | `/project-manager steer PANE_ID PROMPT` | Submit a follow-up in the same idle worker session if a working slot is available. The previous result may be `READ` or `UNREAD`. Return the pane ID and submission status. |
 | `/project-manager query PANE_ID [--turn TURN_ID]` | Return the worker turn's status and its full message from the native session when finished. Use the latest turn by default or request an exact native turn ID. Reading leaves delivery status unchanged. |
 | `/project-manager mark-read PANE_ID TURN_ID` | Acknowledge handling the exact finished turn. Return `read` when it was already acknowledged or when the suffix is updated. Refuse a stale turn ID or a locked pane. |
-| `/project-manager close PANE_ID` | Close a verified idle, unlocked worker pane. If zoom prevents closure, set its suffix to `dead` and return `close_deferred`. Pane preparation retries the close once the pane is idle and the zoom lock clears. Confirm an already absent binding before reporting it closed. |
+| `/project-manager close PANE_ID` | Close a verified idle, unlocked worker pane. If zoom prevents closure, the pane manager marks its displayed ID `DEAD` and returns `close_deferred`. Pane preparation retries the close once the pane is idle and the zoom lock clears. Confirm an already absent binding before reporting it closed. |
 
 Query results identify the pane, native turn ID, turn state, delivery state and the named parameters from the worker's run. A confirmed interruption is a finished turn with an interruption message. An unverifiable outcome is `unknown` with its reason.
 
 Each pane ID is scoped to the selected profile's Herdr workspace and verified pane binding. `steer` verifies the bound thread and guards submission against a change to the last observed native turn, including turns started in the Codex TUI. `run` and `steer` use the same capacity and quota checks as cron. A definitive refusal reports the cause and means no prompt was submitted. Release unused reservations and close a newly created idle pane after a definitive refusal. If cleanup is blocked, report that pane ID. If a prompt may have been submitted, report `outcome_unknown` and the pane ID when known. Resolve the receipt before retrying.
 
-For direct interaction with a Codex worker, zoom its pane and use the Codex prompt in that pane. The engine resumes automation after unlock and verification of the same thread. Panes marked `dead` are awaiting [deferred close](WORKFLOW.md#deferred-close). See [interactive Codex workers](WORKFLOW.md#interactive-codex-workers).
+For direct interaction with a Codex worker, zoom its pane and use the Codex prompt in that pane. The engine resumes automation after unlock and verification of the same thread. A `DEAD` mark on the displayed pane ID indicates a [deferred close](WORKFLOW.md#deferred-close). See [interactive Codex workers](WORKFLOW.md#interactive-codex-workers).
 
 ## Named parameters
 
@@ -58,7 +58,7 @@ Each `--param` takes one `KEY=VALUE` token. Quote the whole token with double qu
 | Command | Information returned |
 | --- | --- |
 | `/project-manager workers` | Configured worker names, descriptions, agent, model and declared template parameters. Shows which parameters require a value for a run. |
-| `/project-manager panes [FILTER ...]` | Workspace ID and matching managed pane records. Each record includes `pane_id`, `role`, `worker` when relevant, `suffix`, `presence`, `lock`, effective `state`, latest native `turn_id` when known, `completed_at` when known, and `delivery`. |
+| `/project-manager panes [FILTER ...]` | Workspace ID and matching managed pane records. Each record includes the native `pane_id`, `role`, `worker` when relevant, application `suffix`, `presence`, `lock`, effective `state`, latest native `turn_id` when known, `completed_at` when known, `delivery`, and any pending closure reported by the pane manager. |
 | `/project-manager capacity` | Maximum working panes, occupied places, available places, the pane IDs or unresolved launches counted against the limit, and which workers pass the [scripted launch preflight](WORKFLOW.md#cron-tick). Report the hold reason for each unavailable worker. |
 | `/project-manager quota [--worker NAME]` | For all configured Codex accounts or the account used by the named worker, show the associated workers, window usage, elapsed allowance, reset, observation time and reason for any hold. A worker without a Codex quota check reports that quota is inapplicable. |
 

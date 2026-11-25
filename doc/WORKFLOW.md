@@ -42,7 +42,7 @@ After unlock, verify the attachment and thread state before resuming automation.
 
 Use the same scripted workspace and pane verification on first launch and on each cron tick. Find the managed workspace in Herdr and verify its exact ID. Create it through the pane manager when none is bound. Scope each pane to its exact Herdr instance, workspace ID and pane ID. Verify the binding and read turn IDs and named run parameters through the corresponding session API. If the binding or the outcome of an operation is ambiguous, hold the affected pane until its state can be verified.
 
-Keep the Herdr pane ID as the label prefix. The managed suffixes are:
+The pane manager owns the ID prefix of the pane label. The engine supplies the application suffix that follows it.
 
 | Suffix | Meaning |
 | --- | --- |
@@ -51,7 +51,6 @@ Keep the Herdr pane ID as the label prefix. The managed suffixes are:
 | `pm-worker:<name>:working` | The latest turn is starting or running. |
 | `pm-worker:<name>:unread` | The tracked worker turn finished and its result is pending workflow acknowledgement. |
 | `pm-worker:<name>:read` | The workflow acknowledged the exact worker turn. |
-| `pm-worker:<name>:dead` | A close was requested and deferred by zoom. The pane is pending closure. |
 | `pm-worker:<name>:unknown` | The engine cannot verify the pane or turn outcome. |
 
 Verify suffix updates against the current binding. Confirm that the exact result is retrievable before marking a pane unread. Use the dependency APIs to verify suffix state after a restart or a failed rename. For a closed pane whose binding can be verified, use native turn history for the result. The workflow decides when to close worker panes. The engine verifies that a requested close is safe.
@@ -60,9 +59,9 @@ Treat a zoom-locked pane as `working` in all scheduling and capacity decisions. 
 
 ### Deferred close
 
-Check zoom explicitly when closing a verified worker pane. Herdr must check the zoom lock again when applying the close so a newly zoomed pane stays open. If the target pane or a sibling in its tab is zoomed, set the target pane's `dead` suffix. Setting this suffix is a label-only operation and can run while zoomed. Return `close_deferred` once the suffix is verified. If the lock is unknown, hold the close until it can be verified.
+The pane manager checks zoom explicitly when closing a verified pane. Herdr must check the zoom lock again when applying the close so a newly zoomed pane stays open. If the target pane or a sibling in its tab is zoomed, the pane manager adds `DEAD` to the displayed pane ID in the label prefix and returns `close_deferred` once the mark is verified. The mark can be set while zoomed. The native Herdr ID remains the address for operations, and the application suffix stays intact. If the lock is unknown, hold the close until it can be verified.
 
-Preserve `dead` through worker status updates. The operator can still use the pane interactively. The engine skips it for submissions and result delivery. During pane preparation, retry the deferred close when the pane is verified idle and the zoom lock has cleared. Confirm closure through the pane manager.
+The pane manager preserves the `DEAD` mark through application suffix updates and exposes pending closure in its layout records. The operator can still use the pane interactively. The engine uses the pane manager's pending-closure status to skip submissions and result delivery. During pane preparation, it asks the pane manager to retry pending closes for verified idle panes. The pane manager checks zoom again and confirms closure.
 
 Determine manager turn state through the Hermes gateway and worker state through the agent manager. Distinguish a running turn (`working`), an agent waiting for input or approval (`blocked`), and a bound pane process stopped by the operating system (`suspended`). A suspended manager TUI prevents scheduled delivery even while the gateway keeps running. A `done` result requires a completion receipt for the exact turn. With missing or conflicting evidence, report `unknown`. Hold new submissions to blocked, suspended, and unknown sessions. An unfinished worker turn continues to occupy capacity while blocked or suspended. Use Herdr's UI agent status as evidence for a hold and the bound session to verify readiness and turn completion. [Herdr status detection](https://herdr.dev/tui/docs/agents/#how-status-works)
 
@@ -113,8 +112,8 @@ The pane manager supplies workspace and pane identity, layout, and guarded mutat
 
 - Use `workspaces` and `workspace-create` in the configured local Herdr instance. Use `layout` and `lock-status` to verify workspace, pane IDs, labels, and zoom state.
 - Use `create --argv` with the manager working directory and suffix to launch the Hermes TUI. Worker panes are created by the agent manager during `provision`. Retain any pane ID from a partial or uncertain creation for reconciliation.
-- Use `rename` to set a suffix while preserving the pane ID prefix. Require a label-only operation to set `dead` on the exact bound pane while zoomed. Keep ordinary renames subject to the zoom check.
-- Require `close` on the exact bound pane to check the target and tab zoom state at the point Herdr applies the mutation. Return `user_locked`, `tab_user_locked`, or `lock_unknown` without closing when the lock disallows it. Use the verified layout and mutation receipts to confirm the result.
+- Use `rename` to set the application suffix while preserving the pane manager's ID prefix. Keep ordinary renames subject to the zoom check.
+- Require `close` on the exact bound pane to check the target and tab zoom state at the point Herdr applies the mutation. For `user_locked` or `tab_user_locked`, the pane manager marks its displayed ID `DEAD` and returns `close_deferred` with the native pane ID. Expose pending closure in `layout`. For `lock_unknown`, hold until the lock can be verified. Use the verified layout and mutation receipts to confirm the result.
 
 ### Herdr agent manager
 
