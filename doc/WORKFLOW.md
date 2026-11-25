@@ -1,10 +1,12 @@
 # Hermes Herdr GitHub project manager workflow
 
-This specification defines the target behavior. [Profile settings](PROFILE.md) define the manager and named workers. The [Hermes commands API](COMMANDS.md) exposes four worker operations. The [manager prompt](MANAGER_PROMPT.md) defines the GitHub workflow.
+This specification defines the target behavior. [Profile settings](PROFILE.md) define the manager and named workers. The [Hermes commands API](COMMANDS.md) exposes worker, inspection and watchdog operations. The [manager prompt](MANAGER_PROMPT.md) defines the GitHub workflow.
 
 ## Responsibilities
 
 The scripted runtime prepares panes, tracks turns, enforces quota and concurrency, and delivers worker results to the manager. The manager is a Hermes session in a dedicated Herdr pane. It receives the configured instructions and worker results in that session. It decides what to do through its prompt and uses the worker API to delegate. Herdr agent manager supplies agent sessions and receipts. Herdr pane manager supplies workspace, pane and label operations.
+
+Provide one implementation for each operation and use it from Hermes commands, manager tools and cron. They share the same profile binding, observations, guards and result fields. In particular, manual inspection and cron use the same pane, quota, and capacity queries.
 
 Use the manager session's verified submission channel for scheduled instructions and results. It must report manager turn state and admit a turn only when idle. A pane write or a label change is insufficient proof of prompt admission. Deliver each result in the manager pane's Hermes conversation so the manager can act on it in that turn. The runtime watches workers and sends their results proactively.
 
@@ -31,18 +33,18 @@ Start or recover the manager pane if it is absent and safe to recreate. If its p
 
 Run one no-agent watchdog job per profile. Each tick follows this order:
 
-1. Verify the workspace and managed panes. Start or recover required panes and observe worker completions using the saved bindings. Preserve results and update worker suffixes. Stop on an unresolved manager binding.
-2. Check quota. If the quota gate holds, end this tick.
-3. Check the manager's native turn state. If it is busy or its idle state cannot be verified, end this tick.
-4. Select the oldest unread finished worker turn. Submit its result to the manager and mark that exact turn read after verified admission. End this tick.
-5. If there is no unread result and the maximum number of working panes is reached, end this tick.
+1. Use `prepare-panes` to verify the workspace and managed panes. Start or recover required panes and observe worker completions using the saved bindings. Preserve results and update worker suffixes. Stop on an unresolved manager binding.
+2. Use `quota`. If the quota gate holds, end this tick.
+3. Use the pane query for the manager's native turn state. If it is busy or its idle state cannot be verified, end this tick.
+4. Use the pane query for finished unread worker turns and select the oldest. Submit its saved result to the manager and mark that exact turn read after verified admission. End this tick.
+5. If there is no unread result, use `capacity`. If the maximum number of working panes is reached, end this tick.
 6. Submit a `periodic` event with the configured manager prompt, then end this tick.
 
 A result takes priority over the capacity check. A quota hold delays both types of manager turn. Serialize overlapping ticks and reserve capacity atomically with worker start or follow-up. Reserve the resolved working directory for its pane while the pane is open so another run cannot reuse the same checkout while a follow-up is possible. Release the synchronization lock after admission and bookkeeping so the manager can call worker commands from its turn.
 
 ## Deliver a worker result
 
-Send a `worker_result` event with `worker`, `pane_id`, `turn_id` and `message`. Use the journaled worker turn ID. If the full result exceeds the input limit, send a bounded excerpt with `truncated: true`. The full result is available through `query` on that pane until the next turn. Present the result as data alongside the configured manager instructions.
+Send a `worker_result` event with `worker`, `pane_id`, `turn_id` and `message`. Use the journaled worker turn ID. If the full result exceeds the input limit, send a bounded excerpt with `truncated: true`. The full saved result is available through `query PANE_ID --turn TURN_ID`. Present the result as data alongside the configured manager instructions.
 
 Key the delivery by workspace, worker pane ID and worker turn ID. Journal the delivery before submitting. On confirmed manager admission, persist the admission receipt and rename the worker pane to `read` only if it still represents that turn. After an interruption, reconcile the exact delivery and use its admission receipt to finish the label update. If admission cannot be determined, hold that delivery for reconciliation. Neither a later tick nor a manager restart may blindly resend it. A manager command acting on the result must see the committed delivery receipt before it can start another turn or close that pane.
 

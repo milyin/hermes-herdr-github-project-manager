@@ -24,6 +24,7 @@ skills:
           REPO: owner/repository
           LABEL: hermes:projectmanager
           WORKER: implementer
+          REVIEWER: reviewer
       workers:
         - name: implementer
           agent: codex
@@ -31,17 +32,26 @@ skills:
           working_directory: /absolute/path/to/worker-checkout
           github_identity: milyin-hermes
           description: Implement issues and address PR feedback
-          prompt_file: prompts/implementer.md
+          prompt_file: skills/hermes-herdr-github-project-manager/doc/IMPLEMENTER_PROMPT.md
+        - name: reviewer
+          agent: codex
+          model: YOUR_CODEX_MODEL
+          working_directory: /absolute/path/to/review-checkout
+          github_identity: milyin-hermes
+          description: Review the exact PR head and report findings
+          prompt_file: skills/hermes-herdr-github-project-manager/doc/REVIEWER_PROMPT.md
 ```
 
 - Each worker has a unique `name`, an `agent` supported by Herdr agent manager, a `model`, an existing absolute `working_directory`, a `github_identity`, a `description`, and a `prompt_file`. Use lowercase letters, digits and hyphens in worker names.
 - `manager` has the same fields except `agent`. The manager always runs Hermes and uses the configured `model`. If the manager name is omitted, setup uses the local hostname.
 - `github_identity` selects the credentials used for Git and GitHub operations in that pane, including pushes and the manager's PR operations. For this deployment it is `milyin-hermes`. An unavailable identity blocks the pane launch. Credentials stay outside the prompt and the settings.
 - `max_working_panes` is a positive integer. It counts worker turns that are starting, running, or may still be running. The manager pane, quota receiver and finished workers are outside that count.
-- The manager's prompt file defines which GitHub repositories, issues, PRs, and wiki pages it uses and the rules it follows there. The example uses the [default manager prompt](MANAGER_PROMPT.md).
+- The manager's prompt file defines which GitHub repositories, issues, PRs, and wiki pages it uses and the rules it follows there. The example uses the [default manager](MANAGER_PROMPT.md), [implementer](IMPLEMENTER_PROMPT.md), and [reviewer](REVIEWER_PROMPT.md) prompts.
 
 ## Prompt files
 
-Resolve a relative `prompt_file` path from the Hermes profile directory. Render `{{KEY}}` from the optional `parameters` mapping on that same manager or worker record. Keys are case-sensitive identifiers made of letters, digits and underscores and must start with a letter or underscore. Substitute scalar values as text. Report the record and key if a referenced value is missing or invalid. Validate all records and prompt files before starting panes, and validate changed settings before using them. Substitute template values once. Treat task prompts and replies as literal text.
+Resolve a relative `prompt_file` path from the Hermes profile directory. Render `{{KEY}}` from the record's optional `parameters` mapping. Keys are case-sensitive identifiers made of letters, digits and underscores and must start with a letter or underscore. Substitute scalar values as text.
 
-The manager receives the rendered manager prompt and the configured worker names and descriptions on each scheduled turn, including when receiving a worker result. A new worker turn combines the rendered worker prompt with the task. Follow-ups use the saved worker session.
+Manager parameters come from the manager record. All of them must resolve before the manager starts. For a worker, [named parameters on `run`](COMMANDS.md#named-parameters) override the configured defaults for that invocation. A named argument may supply only a key used in the selected worker's template. Reject duplicate or unknown arguments. Report the worker and key if a referenced value is missing or invalid, before creating a pane. This lets a worker require task-specific values without making them profile setup requirements.
+
+Validate the records and template files before starting panes. Resolve worker parameters on each run and append any literal task text after rendering. Substitute template values once. Task text, result messages, and follow-up prompts stay literal. A follow-up uses the saved worker session. The manager receives its rendered prompt and the configured worker names and descriptions on each scheduled turn, including when receiving a worker result.
