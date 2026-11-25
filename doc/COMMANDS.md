@@ -29,6 +29,12 @@ Pass the issue and task to the [default implementer prompt](IMPLEMENTER_PROMPT.m
 /project-manager run implementer --param REPO=owner/repo --param ISSUE=owner/repo#42 --param "TASK=Implement the issue and run tests"
 ```
 
+For an existing PR, pass it directly with `PR`. The default implementer uses `none` for an omitted issue or PR.
+
+```text
+/project-manager run implementer --param REPO=owner/repo --param PR=https://github.com/owner/repo/pull/27 --param "TASK=Address the review feedback"
+```
+
 Each `--param` takes one `KEY=VALUE` token. Quote the whole token with double quotes for spaces and use `\"` and `\\` inside quoted values for a literal quote and backslash. The handler reads text, with no shell expansion. With named parameters, text after `--` is an optional literal addition to the rendered prompt. Without named parameters, `run NAME PROMPT` passes the remaining text as the task. See [parameter resolution](PROFILE.md#prompt-files).
 
 ## Inspect the workspace

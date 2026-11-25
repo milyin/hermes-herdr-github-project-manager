@@ -33,6 +33,9 @@ skills:
           github_identity: milyin-hermes
           description: Implement issues and address PR feedback
           prompt_file: skills/hermes-herdr-github-project-manager/doc/IMPLEMENTER_PROMPT.md
+          parameters:
+            ISSUE: none
+            PR: none
         - name: reviewer
           agent: codex
           model: YOUR_CODEX_MODEL
@@ -52,6 +55,6 @@ skills:
 
 Resolve a relative `prompt_file` path from the Hermes profile directory. Render `{{KEY}}` from the record's optional `parameters` mapping. Keys are case-sensitive identifiers made of letters, digits and underscores and must start with a letter or underscore. Substitute scalar values as text.
 
-Manager parameters come from the manager record. All of them must resolve before the manager starts. For a worker, [named parameters on `run`](COMMANDS.md#named-parameters) override the configured defaults for that invocation. A named argument may supply only a key used in the selected worker's template. Reject duplicate or unknown arguments. Report the worker and key if a referenced value is missing or invalid, before creating a pane. This lets a worker require task-specific values without making them profile setup requirements.
+Manager parameters come from the manager record. All of them must resolve before the manager starts. For a worker, use the values in its `parameters` mapping as defaults. [Named parameters on `run`](COMMANDS.md#named-parameters) override those defaults for that invocation. An explicit empty value counts as supplied. A named argument may supply only a key used in the selected worker's template. Reject duplicate or unknown arguments. Report the worker and key if a referenced value is missing or invalid, before creating a pane. This lets a worker require task-specific values without making them profile setup requirements.
 
 Validate the records and template files before starting panes. Resolve worker parameters on each run and append any literal task text after rendering. Substitute template values once. Task text, result messages, and follow-up prompts stay literal. A follow-up uses the saved worker session. The manager receives its rendered prompt and the configured worker names and descriptions on each scheduled turn, including when receiving a worker result.
