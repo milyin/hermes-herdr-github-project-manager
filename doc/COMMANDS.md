@@ -28,13 +28,13 @@ Pane preparation and `tick` are available through the operator commands and cron
 | `/project-manager steer PANE_ID PROMPT` | Submit a follow-up in the same idle worker session if a working slot is available. The previous result may be `READ` or `UNREAD`. Return the pane ID and submission status. |
 | `/project-manager query PANE_ID [--turn TURN_ID]` | Return the worker turn's status and its full message from the native session when finished. Use the latest turn by default or request an exact native turn ID. Reading leaves delivery status unchanged. |
 | `/project-manager mark-read PANE_ID TURN_ID` | Acknowledge handling the exact finished turn. Return `read` when it was already acknowledged or when the suffix is updated. Refuse a stale turn ID or a locked pane. |
-| `/project-manager close PANE_ID` | Close a verified idle, unlocked worker pane at the workflow's or operator's request. Confirm an already absent binding before reporting it closed. The worker's native session history retains the results. |
+| `/project-manager close PANE_ID` | Close a verified idle, unlocked worker pane. If zoom prevents closure, set its suffix to `dead` and return `close_deferred`. Pane preparation retries the close once the pane is idle and the zoom lock clears. Confirm an already absent binding before reporting it closed. |
 
 Query results identify the pane, native turn ID, turn state, delivery state and the named parameters from the worker's run. A confirmed interruption is a finished turn with an interruption message. An unverifiable outcome is `unknown` with its reason.
 
 Each pane ID is scoped to the selected profile's Herdr workspace and verified pane binding. `steer` verifies the bound thread and guards submission against a change to the last observed native turn, including turns started in the Codex TUI. `run` and `steer` use the same capacity and quota checks as cron. A definitive refusal reports the cause and means no prompt was submitted. Release unused reservations and close a newly created idle pane after a definitive refusal. If cleanup is blocked, report that pane ID. If a prompt may have been submitted, report `outcome_unknown` and the pane ID when known. Resolve the receipt before retrying.
 
-For direct interaction with a Codex worker, zoom its pane and use the Codex prompt in that pane. The project manager resumes its automation after unlock and verification of the same thread. See [interactive Codex workers](WORKFLOW.md#interactive-codex-workers).
+For direct interaction with a Codex worker, zoom its pane and use the Codex prompt in that pane. The engine resumes automation after unlock and verification of the same thread. Panes marked `dead` are awaiting [deferred close](WORKFLOW.md#deferred-close). See [interactive Codex workers](WORKFLOW.md#interactive-codex-workers).
 
 ## Named parameters
 
