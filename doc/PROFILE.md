@@ -8,7 +8,7 @@ Setup is ready when the manager pane is attached to its gateway conversation and
 
 Store the project-manager configuration in the Hermes profile under `skills.config.hermes-herdr-github-project-manager`.
 
-This example configures the [GitHub manager](MANAGER_PROMPT.md), [implementer](IMPLEMENTER_PROMPT.md), and [reviewer](REVIEWER_PROMPT.md) prompts. Replace the repository, models, and working directories with your own values.
+This example configures the GitHub workflow with its [manager](MANAGER_PROMPT.md), [implementer](IMPLEMENTER_PROMPT.md), and [reviewer](REVIEWER_PROMPT.md) prompts. Replace the repository, models, and working directories with your own values. To use a different workflow, choose its prompt files and supply their template parameters.
 
 ```yaml
 skills:
@@ -72,4 +72,4 @@ Resolve a relative `prompt_file` path from the Hermes profile directory. Declare
 
 Set each manager parameter to its value in the profile. For a worker, a scalar value sets the default and `null` declares a required input without a default. [Named parameters on `run`](COMMANDS.md#named-parameters) supply required values or override defaults for that run. An explicit empty string counts as supplied. Accept only declared keys used in the selected worker's template. Reject duplicate or unknown arguments. If a required input has no value, report the worker and key before creating its pane.
 
-Resolve worker parameters on each run and substitute their values as text in one pass. Append any literal task text after rendering. Result messages and follow-up prompts stay literal. A follow-up uses the saved worker session. The manager receives its rendered prompt and the configured worker names and descriptions on each scheduled turn, including when receiving a worker result.
+The engine resolves worker parameters on each run and substitutes their values as text in one pass. Append any literal task text after rendering. Result messages and follow-up prompts stay literal. A follow-up uses the bound worker session. The manager receives its rendered prompt and the configured worker names and descriptions on each scheduled turn, including when receiving a worker result.
