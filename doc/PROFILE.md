@@ -23,7 +23,7 @@ skills:
         parameters:
           REPO: owner/repository
           LABEL: hermes:projectmanager
-          WORKER: implementer
+          IMPLEMENTER: implementer
           REVIEWER: reviewer
       workers:
         - name: implementer

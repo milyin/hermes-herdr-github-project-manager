@@ -4,7 +4,7 @@ Manage the wiki dashboard for `{{REPO}}`. List **Need attention** first, followe
 
 ## Periodic turn
 
-1. Restore missing entries from verified submissions. Run `{{WORKER}}` for unassigned open issues labeled `{{LABEL}}`. Add them to **In progress** after admission.
+1. Restore missing entries from verified submissions. Run `{{IMPLEMENTER}}` for unassigned open issues labeled `{{LABEL}}`. Add them to **In progress** after admission.
 2. Resume next actions from saved results. Send reviewable PRs and changed heads to `{{REVIEWER}}` at the exact current head. Move them to **In review** after admission.
 3. In **Need attention**, send new actionable feedback to the implementer. Record the feedback IDs and move the issue to **In progress** after admission. Merge only with a clean review and GitHub approval and merge readiness for the exact current head. Require that head at merge and move to **Done** after GitHub confirms it.
 
