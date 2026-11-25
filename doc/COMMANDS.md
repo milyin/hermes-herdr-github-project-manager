@@ -2,6 +2,23 @@
 
 Use `/project-manager` in the Hermes interface for the selected project-manager profile. It lists the available commands. The Hermes command handler, manager tools and cron use the same operation implementations, result fields and guards. The interface formats those results for the user. Cron consumes them directly.
 
+## Manager tools
+
+Hermes gives the bound manager session these registered tools and their argument schemas. Each calls the corresponding operation below. The runtime supplies the profile and workspace from the session binding.
+
+| Tool | Arguments |
+| --- | --- |
+| `project_manager_run` | `name` and optional `parameters` and `prompt`, under the same rules as `run`. |
+| `project_manager_steer` | `pane_id` and `prompt`. |
+| `project_manager_query` | `pane_id` and optional `turn_id`. |
+| `project_manager_close` | `pane_id`. |
+| `project_manager_workers` | None. |
+| `project_manager_panes` | Optional `role`, `worker`, `pane_id`, `state`, `delivery`, `presence`, and `lock` filters. |
+| `project_manager_capacity` | None. |
+| `project_manager_quota` | Optional `worker`. |
+
+Pane preparation and `tick` are available through the operator commands and cron. The manager uses the tools above within its turn.
+
 ## Worker commands
 
 | Command | Result and behavior |

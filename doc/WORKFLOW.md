@@ -4,11 +4,17 @@ This specification defines the target behavior. [Profile settings](PROFILE.md) d
 
 ## Responsibilities
 
-The scripted runtime prepares panes, tracks turns, enforces quota and concurrency, and delivers worker results to the manager. The manager is a Hermes session in a dedicated Herdr pane. It receives the configured instructions and worker results in that session. It decides what to do through its prompt and uses the worker API to delegate. Use the [dependency skills](#dependency-skill-requirements) for agent sessions and pane operations.
+The scripted runtime prepares panes, tracks turns, enforces quota and concurrency, and delivers worker results to the manager. The manager is a Hermes session in a dedicated Herdr pane. It decides what to do through its prompt and calls the [project-manager tools](COMMANDS.md#manager-tools) to delegate and inspect panes. The runtime uses the [dependency skills](#dependency-skill-requirements) for the underlying agent and pane operations.
 
 Provide one implementation for each operation and use it from Hermes commands, manager tools and cron. They share the same profile binding, observations, guards and result fields. In particular, manual inspection and cron use the same pane, quota, and capacity queries.
 
 Use the manager session's verified submission channel for scheduled instructions and results. It must report manager turn state and admit a turn only when idle. A pane write or a label change is insufficient proof of prompt admission. Deliver each result in the manager pane's Hermes conversation so the manager can act on it in that turn. The runtime watches workers and sends their results proactively.
+
+## Manager system prompt
+
+The project-manager plugin registers its own tools and supplies their names and argument schemas to the manager session. Register the following fixed instructions through Hermes's system-prompt section API for the bound manager session before its first turn. The editable manager prompt supplies project policy separately. [Hermes system-prompt sections](https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks#cache-safe-system-prompt-sections)
+
+> Use only the registered project-manager tools to start or steer workers, inspect panes and results, and close worker panes. Use `project_manager_run` to start a worker, `project_manager_steer` for a follow-up, `project_manager_query` for a result, and `project_manager_close` to close a pane. Leave pane preparation and scheduled delivery to the runtime.
 
 ## Pane lifecycle
 
