@@ -17,46 +17,29 @@ skills:
         name: projectmanager
         model: YOUR_HERMES_MODEL
         working_directory: /absolute/path/to/manager
-        github_identity: milyin-hermes
-        description: Manage the repository and its dashboard
-        prompt_file: skills/hermes-herdr-github-project-manager/doc/MANAGER_PROMPT.md
+        launch_profile: manager-profile
+        description: Coordinate work and handle results
+        prompt_file: prompts/manager.md
         parameters:
-          REPO: owner/repository
-          LABEL: hermes:projectmanager
-          IMPLEMENTER: implementer
-          REVIEWER: reviewer
+          WORKER: summarizer
       workers:
-        - name: implementer
+        - name: summarizer
           agent: codex
           model: YOUR_CODEX_MODEL
-          working_directory: /absolute/path/to/worker-checkout
-          github_identity: milyin-hermes
-          description: Implement issues and address PR feedback
-          prompt_file: skills/hermes-herdr-github-project-manager/doc/IMPLEMENTER_PROMPT.md
+          working_directory: /absolute/path/to/worker
+          launch_profile: worker-profile
+          description: Summarize supplied material
+          prompt_file: prompts/summarizer.md
           parameters:
-            REPO: null
-            ISSUE: none
-            PR: none
             TASK: null
-        - name: reviewer
-          agent: codex
-          model: YOUR_CODEX_MODEL
-          working_directory: /absolute/path/to/review-checkout
-          github_identity: milyin-hermes
-          description: Review the exact PR head and report findings
-          prompt_file: skills/hermes-herdr-github-project-manager/doc/REVIEWER_PROMPT.md
-          parameters:
-            REPO: null
-            ISSUE: null
-            PR: null
-            HEAD: null
+            FORMAT: bullets
 ```
 
-- Each worker has a unique `name`, an `agent` supported by Herdr agent manager, a `model`, an existing absolute `working_directory`, a `github_identity`, a `description`, and a `prompt_file`. Use lowercase letters, digits and hyphens in worker names.
+- Each worker has a unique `name`, an `agent` supported by Herdr agent manager, a `model`, an existing absolute `working_directory`, a `description`, and a `prompt_file`. Use lowercase letters, digits and hyphens in worker names.
 - `manager` has the same fields except `agent`. The manager always runs Hermes and uses the configured `model`. If the manager name is omitted, setup uses the local hostname.
-- `github_identity` selects the credentials used for Git and GitHub operations in that pane, including pushes and the manager's PR operations. For this deployment it is `milyin-hermes`. An unavailable identity blocks the pane launch. Credentials stay outside the prompt and the settings.
-- `max_working_panes` is a positive integer. It counts workers that are starting, running, possibly still running, or whose pane is locked or has an unverified lock. The manager pane, quota receiver and verified unlocked finished workers are outside that count.
-- The manager's prompt file defines which GitHub repositories, issues, PRs, and wiki pages it uses and the rules it follows there. The example uses the [default manager](MANAGER_PROMPT.md), [implementer](IMPLEMENTER_PROMPT.md), and [reviewer](REVIEWER_PROMPT.md) prompts.
+- `launch_profile` is an optional name for a per-pane execution profile supplied by the agent manager. The runtime passes through the name. The agent manager must apply the requested environment and credentials or refuse the launch. Store credentials in the agent manager's credential setup.
+- `max_working_panes` is a positive integer. It counts workers that are starting, running, blocked or suspended mid-turn, possibly still running, or whose pane is locked or has an unverified lock. The manager pane, quota receiver and verified unlocked finished workers are outside that count.
+- Select prompts for your project. The [example manager](MANAGER_PROMPT.md), [implementer](IMPLEMENTER_PROMPT.md), and [reviewer](REVIEWER_PROMPT.md) prompts define one workflow. Supply their template parameters when selecting them.
 
 ## Prompt files
 

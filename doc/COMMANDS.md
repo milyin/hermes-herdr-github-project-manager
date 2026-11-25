@@ -40,16 +40,10 @@ The Hermes command accepts repeated named values declared in the worker's settin
 /project-manager run NAME --param KEY=VALUE [--param KEY=VALUE ...] [-- PROMPT]
 ```
 
-Pass the issue and task to the [default implementer prompt](IMPLEMENTER_PROMPT.md) like this.
+For the worker in the [profile example](PROFILE.md#settings), pass a task and optionally override the default output format.
 
 ```text
-/project-manager run implementer --param REPO=owner/repo --param ISSUE=owner/repo#42 --param "TASK=Implement the issue and run tests"
-```
-
-For an existing PR, pass it directly with `PR`. The default implementer uses `none` for an omitted issue or PR.
-
-```text
-/project-manager run implementer --param REPO=owner/repo --param PR=https://github.com/owner/repo/pull/27 --param "TASK=Address the review feedback"
+/project-manager run summarizer --param "TASK=Summarize the meeting notes" --param FORMAT=paragraphs
 ```
 
 Each `--param` takes one `KEY=VALUE` token. Quote the whole token with double quotes for spaces and use `\"` and `\\` inside quoted values for a literal quote and backslash. The handler reads text, with no shell expansion. With named parameters, text after `--` is an optional literal addition to the rendered prompt. Without named parameters, `run NAME PROMPT` passes the remaining text as the task. See [parameter resolution](PROFILE.md#prompt-files).
@@ -60,12 +54,12 @@ Each `--param` takes one `KEY=VALUE` token. Quote the whole token with double qu
 | --- | --- |
 | `/project-manager workers` | Configured worker names, descriptions, agent, model and declared template parameters. Shows which parameters require a value for a run. |
 | `/project-manager panes [FILTER ...]` | Workspace ID and matching managed pane records. Each record includes `pane_id`, `role`, `worker` when relevant, `suffix`, `presence`, `lock`, effective `state`, latest local `turn_id`, `completed_at` when known, and `delivery`. |
-| `/project-manager capacity` | Maximum working panes, occupied places, available places, and the pane IDs or unresolved launches counted against the limit. |
+| `/project-manager capacity` | Maximum working panes, occupied places, available places, the pane IDs or unresolved launches counted against the limit, and which workers pass the [scripted launch preflight](WORKFLOW.md#cron-tick). Report the hold reason for each unavailable worker. |
 | `/project-manager quota [--worker NAME]` | For all configured Codex accounts or the account used by the named worker, show the associated workers, window usage, elapsed allowance, reset, observation time and reason for any hold. A worker without a Codex quota check reports that quota is inapplicable. |
 
-`panes` supports `--role ROLE` (manager, worker or quota), `--worker NAME`, `--pane PANE_ID`, `--state STATE` (idle, starting, working, done or unknown), `--delivery DELIVERY` (none, unread, read or unknown), `--present yes/no/unknown`, and `--lock locked/unlocked/unknown`. Combine filters to match all supplied criteria. For example, `/project-manager panes --role worker --state done --delivery unread` shows finished results eligible for delivery, oldest completion first with pane ID breaking ties. A tracked result can still appear when its pane is gone.
+`panes` supports `--role ROLE` (manager, worker or quota), `--worker NAME`, `--pane PANE_ID`, `--state STATE` (idle, starting, working, blocked, suspended, done or unknown), `--delivery DELIVERY` (none, unread, read or unknown), `--present yes/no/unknown`, and `--lock locked/unlocked/unknown`. Combine filters to match all supplied criteria. For example, `/project-manager panes --role worker --state done --delivery unread` shows finished results eligible for delivery, oldest completion first with pane ID breaking ties. A tracked result can still appear when its pane is gone.
 
-Zoom-locked panes have effective state `working`. Use `query` to inspect a saved turn result even while its pane is locked. Inspection commands can refresh observations and preserve verified results. They leave delivery, prompt submission, and pane creation and closure to their corresponding operations.
+Zoom-locked panes have effective state `working`. Unlocked panes distinguish an agent waiting for input (`blocked`) from an operating-system suspension (`suspended`). Use `query` to inspect a saved turn result even while its pane is locked. Inspection commands can refresh observations and preserve verified results. They leave delivery, prompt submission, and pane creation and closure to their corresponding operations.
 
 ## Run watchdog operations
 

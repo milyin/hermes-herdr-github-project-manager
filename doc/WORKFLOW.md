@@ -1,10 +1,12 @@
-# Hermes Herdr GitHub project manager workflow
+# Hermes Herdr project manager workflow
 
-This specification defines the target behavior. [Profile settings](PROFILE.md) define the manager and named workers. The [Hermes commands API](COMMANDS.md) exposes worker, inspection and watchdog operations. The [manager prompt](MANAGER_PROMPT.md) defines the GitHub workflow.
+This specification defines the target behavior. [Profile settings](PROFILE.md) define the manager and named workers. The [Hermes commands API](COMMANDS.md) exposes worker, inspection and watchdog operations.
 
 ## Responsibilities
 
 The scripted runtime prepares panes, tracks turns, enforces quota and concurrency, and delivers worker results to the manager. The manager is a Hermes session in a dedicated Herdr pane. It decides what to do through its prompt and calls the [project-manager tools](COMMANDS.md#manager-tools) to delegate and inspect panes. The runtime uses the [dependency skills](#dependency-skill-requirements) for the underlying agent and pane operations.
+
+The installable skill is project-agnostic. User-selected manager and worker prompts own work discovery, project policy, and external service operations. The runtime handles prompt text and parameter values as opaque input. Its tools, startup integration, and watchdog schedule work from configured resources and verified pane and agent state. The [example manager prompt](MANAGER_PROMPT.md) supplies one project policy.
 
 Provide one implementation for each operation and use it from Hermes commands, manager tools and cron. They share the same profile binding, observations, guards and result fields. In particular, manual inspection and cron use the same pane, quota, and capacity queries.
 
@@ -24,7 +26,7 @@ Keep the Herdr pane ID as the label prefix. The managed suffixes are:
 
 | Suffix | Meaning |
 | --- | --- |
-| `pm-manager` | The bound manager session. The backend receipt identifies whether its turn is idle or busy. |
+| `pm-manager` | The bound manager session. Its actual state comes from the agent manager. |
 | `pm-quota` | A dedicated quota receiver when one is needed to read Codex account limits. |
 | `pm-worker:<name>:working` | The latest turn is starting or running. |
 | `pm-worker:<name>:unread` | The latest turn finished and its result has been preserved for delivery. |
@@ -35,6 +37,8 @@ Verify suffix updates against the current binding. Persist results before markin
 
 Treat a zoom-locked pane as `working` in all scheduling and capacity decisions. A locked manager receives no scheduled turn. A locked worker counts against capacity and delivery of any unread result waits until it is unlocked. Keep the saved result and suffix while the pane is locked. After unlock, use the verified native state and reconcile the suffix. A present worker with an unknown lock still counts against capacity. Hold operations that require an unlocked or idle pane until its state is verified.
 
+Determine agent state in script through the agent manager. Distinguish a running turn (`working`), an agent waiting for input or approval (`blocked`), and a live agent process stopped by the operating system (`suspended`). An idle agent can accept a new turn. A `done` result requires a completion receipt for the exact turn. With missing or conflicting evidence, report `unknown`. Hold new submissions to blocked, suspended, and unknown sessions. An unfinished worker turn continues to occupy capacity while blocked or suspended. Herdr exposes the UI agent status through `agent.get` and `agent.list`. Use it as evidence for a hold. Verify readiness and turn completion through the bound agent session. [Herdr status detection](https://herdr.dev/tui/docs/agents/#how-status-works) · [Herdr socket API](https://herdr.dev/tui/docs/socket-api/)
+
 Start or recover the manager pane if it is absent and safe to recreate. If its previous session is confirmed lost, start a fresh Hermes manager with the same profile and prompt. Preserve verified worker panes and resume observation using their saved receipts. If a worker definitively stopped without a result, preserve its checkout and deliver an interruption result under its saved pane ID. That result remains eligible for delivery even if no live pane remains to rename. Treat a worker that may still be active as unresolved. Recovery must preserve the record of any submitted work and avoid replaying it.
 
 ## Cron tick
@@ -43,12 +47,14 @@ Run one no-agent watchdog job per profile. Each tick follows this order:
 
 1. Use `prepare-panes` to verify the workspace and managed panes. Start or recover required panes and observe worker completions using the saved bindings. Preserve results and update worker suffixes. Stop on an unresolved manager binding.
 2. Use `quota`. If the quota gate holds, end this tick.
-3. Use the pane query for the manager's effective state. If it is working or its idle state cannot be verified, end this tick.
+3. Use the pane query for the manager's effective state. End this tick unless the bound session is verified idle and its pane is unlocked.
 4. Use the pane query for finished unread worker turns and select the oldest. Submit its saved result to the manager and mark that exact turn read after verified admission. End this tick.
-5. If there is no unread result, use `capacity`. If the maximum number of working panes is reached, end this tick.
-6. Submit a `periodic` event with the configured manager prompt, then end this tick.
+5. If there is no unread result, use `capacity` to verify that at least one configured worker is ready to start a run. End this tick if none qualifies.
+6. Submit a `periodic` event with the configured manager prompt so it can discover work, then end this tick.
 
 A result takes priority over the capacity check. A quota hold delays both types of manager turn. Serialize overlapping ticks and reserve capacity atomically with worker start or follow-up. Reserve the resolved working directory for its pane while the pane is open so another run cannot reuse the same checkout while a follow-up is possible. Release the synchronization lock after admission and bookkeeping so the manager can call worker commands from its turn.
+
+A worker is ready to start when a slot and its working directory are available, no unresolved launch conflicts with it, the agent manager verifies its backend, model and launch profile prerequisites, and its quota allows submission. This preflight uses script only. The manager discovers eligible work during its turn. Recheck the selected worker at actual submission.
 
 ## Deliver a worker result
 
@@ -78,7 +84,7 @@ The pane manager supplies workspace and pane identity, layout, and guarded mutat
 
 The agent manager supplies Codex and Hermes sessions, native turn operations, and Codex quota readings. [Herdr agent manager skill](https://github.com/milyin/hermes-herdr-agent-manager) · [Caller API](https://github.com/milyin/hermes-herdr-agent-manager/blob/main/references/api.md)
 
-- Use `provision` with the backend and working directory, and `run --model` with the selected model. Require per-pane Git and GitHub authentication bound to the requested App identity. Refuse when the identity cannot be supplied. Keep credentials out of prompts and receipts.
-- Use `wait` with the exact known turn ID to observe completion. Require a way to verify the bound session's idle or busy state even before its first turn. Preserve a result correlated to the exact thread and turn before another turn can replace it. Distinguish confirmed failure or interruption from an unknown outcome.
+- Use `provision` with the backend and working directory, and `run --model` with the selected model. Require a scripted launch preflight that verifies the configured agent, model, working directory, and any requested launch profile without opening a worker pane or invoking a model. Pass the launch profile reference through unchanged. The agent manager applies that profile to the pane and refuses the launch if it cannot apply it. Keep credentials out of prompts and receipts.
+- Require a machine-readable status query for the exact bound session, including before its first turn. Use native backend state and bound process state to distinguish idle, working, blocked, suspended and unknown. Use `wait` with the exact known turn ID to observe completion. Preserve a result correlated to the exact thread and turn before another turn can replace it. Distinguish confirmed failure or interruption from an unknown outcome.
 - Use idle `steer` bound with `--thread-id` and `--after-turn-id`. Initial and follow-up submissions must enforce idle and lock checks and return a verifiable admission receipt independently of completion. A receipt for a Hermes manager turn must identify the admission into the bound conversation where the result or periodic prompt is delivered. Distinguish a definitive refusal from an unknown outcome.
 - Use `get-remaining-tokens --agent codex` for remaining percentage, window duration, and reset time. Verify that readings and submissions refer to the same Codex account. Report unavailable or unverified observations so the project manager can hold the affected work.

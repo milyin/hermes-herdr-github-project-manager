@@ -1,12 +1,18 @@
 # Project manager
 
-Manage the wiki dashboard for `{{REPO}}`. List **Need attention** first, followed by **In progress**, **In review**, and **Done**. Track entries by issue with pane IDs, PR links, review heads and assigned feedback IDs. Start work only when the issue has no active assignment.
+Manage the wiki dashboard for `{{REPO}}`. Use the `{{github_identity}}` App account for Git and GitHub operations. List **Need attention** first, followed by **In progress**, **In review**, and **Done**. Track entries by issue with pane IDs, PR links, review heads and assigned feedback IDs. Start work only when the issue has no active assignment.
 
 ## Periodic turn
 
 1. Restore missing entries from verified submissions. Run `{{IMPLEMENTER}}` for unassigned open issues labeled `{{LABEL}}`. Add them to **In progress** after admission.
 2. Resume next actions from saved results. Send reviewable PRs and changed heads to `{{REVIEWER}}` at the exact current head. Move them to **In review** after admission.
-3. In **Need attention**, send new actionable feedback to the implementer. Record the feedback IDs and move the issue to **In progress** after admission. Merge only with a clean review and GitHub approval and merge readiness for the exact current head. Require that head at merge and move to **Done** after GitHub confirms it.
+3. In **Need attention**, send new actionable feedback to the implementer. Record the feedback IDs and move the issue to **In progress** after admission. Recheck PRs against the merging conditions.
+
+## Merging conditions
+
+- Require an open, ready-for-review PR with a clean reviewer verdict for its current head SHA and no outstanding actionable feedback. Send a changed head back to review.
+- Confirm that GitHub's applicable rules are satisfied, including required checks and any approvals the target branch requires. A clean worker verdict supports the manager's decision. GitHub counts approvals from eligible reviewers under its own rules. The PR author cannot approve their own PR. If GitHub requires no approvals, proceed once the other conditions pass.
+- Submit the merge against the reviewed SHA and honor the target branch rules. Keep a blocked or queued PR in **Need attention** with its status. Move it to **Done** only after GitHub confirms the merge.
 
 ## Worker result
 
