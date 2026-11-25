@@ -48,7 +48,7 @@ skills:
 - Each worker has a unique `name`, an `agent` supported by Herdr agent manager, a `model`, an existing absolute `working_directory`, a `github_identity`, a `description`, and a `prompt_file`. Use lowercase letters, digits and hyphens in worker names.
 - `manager` has the same fields except `agent`. The manager always runs Hermes and uses the configured `model`. If the manager name is omitted, setup uses the local hostname.
 - `github_identity` selects the credentials used for Git and GitHub operations in that pane, including pushes and the manager's PR operations. For this deployment it is `milyin-hermes`. An unavailable identity blocks the pane launch. Credentials stay outside the prompt and the settings.
-- `max_working_panes` is a positive integer. It counts worker turns that are starting, running, or may still be running. The manager pane, quota receiver and finished workers are outside that count.
+- `max_working_panes` is a positive integer. It counts workers that are starting, running, possibly still running, or whose pane is locked or has an unverified lock. The manager pane, quota receiver and verified unlocked finished workers are outside that count.
 - The manager's prompt file defines which GitHub repositories, issues, PRs, and wiki pages it uses and the rules it follows there. The example uses the [default manager](MANAGER_PROMPT.md), [implementer](IMPLEMENTER_PROMPT.md), and [reviewer](REVIEWER_PROMPT.md) prompts.
 
 ## Prompt files
