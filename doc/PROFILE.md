@@ -6,6 +6,8 @@ Open the configured profile with `hermes -p projectmanager`. The startup integra
 
 Store the project-manager configuration in the Hermes profile under `skills.config.hermes-herdr-github-project-manager`.
 
+This example configures the [GitHub manager](MANAGER_PROMPT.md), [implementer](IMPLEMENTER_PROMPT.md), and [reviewer](REVIEWER_PROMPT.md) prompts. Replace the repository, models, and working directories with your own values.
+
 ```yaml
 skills:
   config:
@@ -17,29 +19,50 @@ skills:
         name: projectmanager
         model: YOUR_HERMES_MODEL
         working_directory: /absolute/path/to/manager
-        launch_profile: manager-profile
-        description: Coordinate work and handle results
-        prompt_file: prompts/manager.md
+        launch_profile: milyin-hermes
+        description: Manage the repository and its wiki dashboard
+        prompt_file: skills/hermes-herdr-github-project-manager/doc/MANAGER_PROMPT.md
         parameters:
-          WORKER: summarizer
+          REPO: owner/repository
+          LABEL: hermes:projectmanager
+          IMPLEMENTER: implementer
+          REVIEWER: reviewer
+          github_identity: milyin-hermes
       workers:
-        - name: summarizer
+        - name: implementer
           agent: codex
           model: YOUR_CODEX_MODEL
-          working_directory: /absolute/path/to/worker
-          launch_profile: worker-profile
-          description: Summarize supplied material
-          prompt_file: prompts/summarizer.md
+          working_directory: /absolute/path/to/implementer-checkout
+          launch_profile: milyin-hermes
+          description: Implement issues and address PR feedback
+          prompt_file: skills/hermes-herdr-github-project-manager/doc/IMPLEMENTER_PROMPT.md
           parameters:
+            REPO: null
+            ISSUE: none
+            PR: none
             TASK: null
-            FORMAT: bullets
+            github_identity: milyin-hermes
+        - name: reviewer
+          agent: codex
+          model: YOUR_CODEX_MODEL
+          working_directory: /absolute/path/to/reviewer-checkout
+          launch_profile: milyin-hermes
+          description: Review the exact PR head and report findings
+          prompt_file: skills/hermes-herdr-github-project-manager/doc/REVIEWER_PROMPT.md
+          parameters:
+            REPO: null
+            ISSUE: null
+            PR: null
+            HEAD: null
+            github_identity: milyin-hermes
 ```
+
+For this example, configure the `milyin-hermes` launch profile in the agent manager with the App account credentials. Each prompt's `github_identity` parameter names that account.
 
 - Each worker has a unique `name`, an `agent` supported by Herdr agent manager, a `model`, an existing absolute `working_directory`, a `description`, and a `prompt_file`. Use lowercase letters, digits and hyphens in worker names.
 - `manager` has the same fields except `agent`. The manager always runs Hermes and uses the configured `model`. If the manager name is omitted, setup uses the local hostname.
 - `launch_profile` is an optional name for a per-pane execution profile supplied by the agent manager. The runtime passes through the name. The agent manager must apply the requested environment and credentials or refuse the launch. Store credentials in the agent manager's credential setup.
 - `max_working_panes` is a positive integer. It counts workers that are starting, running, blocked or suspended mid-turn, possibly still running, or whose pane is locked or has an unverified lock. The manager pane, quota receiver and verified unlocked finished workers are outside that count.
-- Select prompts for your project. The [example manager](MANAGER_PROMPT.md), [implementer](IMPLEMENTER_PROMPT.md), and [reviewer](REVIEWER_PROMPT.md) prompts define one workflow. Supply their template parameters when selecting them.
 
 ## Prompt files
 
