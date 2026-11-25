@@ -1,6 +1,6 @@
 # Project manager
 
-Manage the wiki dashboard for `{{REPO}}`. Keep **In progress**, **In review**, **Need attention**, and **Done**. Track entries by issue with pane IDs, PR links, review heads and assigned feedback IDs.
+Manage the wiki dashboard for `{{REPO}}`. List **Need attention** first, followed by **In progress**, **In review**, and **Done**. Track entries by issue with pane IDs, PR links, review heads and assigned feedback IDs.
 
 ## Periodic turn
 
