@@ -8,9 +8,10 @@ Hermes gives the bound manager gateway session these registered tools and their 
 
 | Tool | Arguments |
 | --- | --- |
-| `project_manager_run` | `name` and optional `parameters` and `prompt`, under the same rules as `run`. |
+| `project_manager_run` | `name` and optional `working_directory`, `parameters`, and `prompt`, under the same rules as `run`. |
 | `project_manager_steer` | `pane_id` and `prompt`. |
 | `project_manager_query` | `pane_id` and optional `turn_id`. |
+| `project_manager_mark_read` | `pane_id` and `turn_id`. |
 | `project_manager_close` | `pane_id`. |
 | `project_manager_workers` | None. |
 | `project_manager_panes` | Optional `role`, `worker`, `pane_id`, `state`, `delivery`, `presence`, and `lock` filters. |
@@ -23,10 +24,11 @@ Pane preparation and `tick` are available through the operator commands and cron
 
 | Command | Result and behavior |
 | --- | --- |
-| `/project-manager run NAME PROMPT` | Render the named worker's prompt and append the task text. Return its pane ID after verified submission. Use the [named-parameter form](#named-parameters) for template values. |
-| `/project-manager steer PANE_ID PROMPT` | Submit a follow-up in the same worker session after its previous result was delivered. Return the pane ID and submission status. |
+| `/project-manager run NAME PROMPT` | Render the named worker's prompt and append the task text. Return its pane ID after verified submission. Use the [option form](#named-parameters) for template values or a separate working directory. |
+| `/project-manager steer PANE_ID PROMPT` | Submit a follow-up in the same idle worker session if a working slot is available. The previous result may be `READ` or `UNREAD`. Return the pane ID and submission status. |
 | `/project-manager query PANE_ID [--turn TURN_ID]` | Return the worker turn's status and its full message from the native session when finished. Use the latest turn by default or request an exact native turn ID. Reading leaves delivery status unchanged. |
-| `/project-manager close PANE_ID` | Close a verified idle worker pane after its result was delivered or if it never received a turn. Confirm an already absent binding before reporting it closed. The worker's native session history retains the results. |
+| `/project-manager mark-read PANE_ID TURN_ID` | Acknowledge handling the exact finished turn. Return `read` when it was already acknowledged or when the suffix is updated. Refuse a stale turn ID or a locked pane. |
+| `/project-manager close PANE_ID` | Close a verified idle, unlocked worker pane at the workflow's or operator's request. Confirm an already absent binding before reporting it closed. The worker's native session history retains the results. |
 
 Query results identify the pane, native turn ID, turn state, delivery state and the named parameters from the worker's run. A confirmed interruption is a finished turn with an interruption message. An unverifiable outcome is `unknown` with its reason.
 
@@ -39,7 +41,7 @@ For direct interaction with a Codex worker, zoom its pane and use the Codex prom
 The Hermes command accepts repeated named values declared in the worker's settings. Supply a value for each parameter declared as `null` and override scalar defaults as needed. A command cannot declare a new parameter.
 
 ```text
-/project-manager run NAME --param KEY=VALUE [--param KEY=VALUE ...] [-- PROMPT]
+/project-manager run NAME [--cwd ABSOLUTE_DIR] [--param KEY=VALUE ...] [-- PROMPT]
 ```
 
 The implementer in the [profile example](PROFILE.md#settings) accepts an issue or an existing PR. The other reference defaults to `none`.
@@ -49,7 +51,7 @@ The implementer in the [profile example](PROFILE.md#settings) accepts an issue o
 /project-manager run implementer --param REPO=owner/repository --param PR=https://github.com/owner/repository/pull/27 --param "TASK=Address the review feedback"
 ```
 
-Each `--param` takes one `KEY=VALUE` token. Quote the whole token with double quotes for spaces and use `\"` and `\\` inside quoted values for a literal quote and backslash. The handler reads text, with no shell expansion. With named parameters, text after `--` is an optional literal addition to the rendered prompt. Without named parameters, `run NAME PROMPT` passes the remaining text as the task. See [parameter resolution](PROFILE.md#prompt-files).
+Each `--param` takes one `KEY=VALUE` token. Quote the whole token with double quotes for spaces and use `\"` and `\\` inside quoted values for a literal quote and backslash. The handler reads text, with no shell expansion. `--cwd` selects an existing absolute working directory for this run. With options, text after `--` is an optional literal addition to the rendered prompt. In the short form, `run NAME PROMPT` passes the remaining text as the task. See [parameter resolution](PROFILE.md#prompt-files).
 
 ## Inspect the workspace
 
@@ -68,5 +70,5 @@ Zoom-locked panes have effective state `working`. Unlocked panes distinguish an 
 
 | Command | Result and behavior |
 | --- | --- |
-| `/project-manager prepare-panes` | Run the same workspace and pane verification, creation and recovery used at the start of every cron tick. Return the workspace, verified panes and holds. |
+| `/project-manager prepare-panes` | Run the workspace and pane verification, creation and recovery operations shared with cron. Return the workspace, verified panes and holds. |
 | `/project-manager tick` | Run one complete [cron tick](WORKFLOW.md#cron-tick) in the same order and under the same lock as the scheduled run. Return the action taken or the reason it stopped, including any delivered worker pane and turn IDs. |

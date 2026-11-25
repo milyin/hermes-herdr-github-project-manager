@@ -61,7 +61,7 @@ skills:
 
 For this example, configure the `milyin-hermes` launch profile with the App account credentials. The manager uses that profile in its gateway session and the workers use it in their agent-manager sessions. Each prompt's `github_identity` parameter names that account.
 
-- Each worker has a unique `name`, an `agent` supported by Herdr agent manager, a `model`, an existing absolute `working_directory`, a `description`, and a `prompt_file`. Use lowercase letters, digits and hyphens in worker names.
+- Each worker has a unique `name`, an `agent` supported by Herdr agent manager, a `model`, an existing absolute `working_directory`, a `description`, and a `prompt_file`. Use lowercase letters, digits and hyphens in worker names. The working directory is the default for `run`. A workflow can supply a separate directory for each pane it retains.
 - `manager` has the same fields except `agent`. The manager always runs Hermes in the TUI and uses the configured `model` in its gateway session. If the manager name is omitted, setup uses the local hostname.
 - `launch_profile` is an optional execution profile name. The agent manager applies it to workers, and the gateway integration applies it to the manager session's tool processes. Refuse the launch when the requested environment or credentials cannot be applied. Store credentials in the launch profile's credential setup.
 - `max_working_panes` is a positive integer. It counts workers that are starting, running, blocked or suspended mid-turn, possibly still running, or whose pane is locked or has an unverified lock. The manager pane, quota receiver and verified unlocked finished workers are outside that count.
