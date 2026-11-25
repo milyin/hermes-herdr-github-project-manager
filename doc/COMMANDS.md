@@ -1,10 +1,10 @@
 # Project manager commands API
 
-Use `/project-manager` in the Hermes interface for the selected project-manager profile. It lists the available commands. The Hermes command handler, manager tools and cron use the same operation implementations, result fields and guards. The interface formats those results for the user. Cron consumes them directly.
+Use `/project-manager` in the Hermes interface for the selected project-manager profile, including the manager pane's TUI. It lists the available commands. The Hermes command handler, manager tools and cron use the same operation implementations, result fields and guards. The interface formats those results for the user. Cron consumes them directly.
 
 ## Manager tools
 
-Hermes gives the bound manager session these registered tools and their argument schemas. Each calls the corresponding operation below. The runtime supplies the profile and workspace from the session binding.
+Hermes gives the bound manager gateway session these registered tools and their argument schemas. Each calls the corresponding operation below. The runtime supplies the profile and workspace from the session binding.
 
 | Tool | Arguments |
 | --- | --- |
@@ -30,7 +30,9 @@ Pane preparation and `tick` are available through the operator commands and cron
 
 Query results identify the pane, turn ID, turn state, delivery state and the saved named parameters from the worker's run. A confirmed interruption is a finished turn with an interruption message. An unverifiable outcome is `unknown` with its reason.
 
-Each pane ID is scoped to the selected profile's Herdr workspace and saved pane binding. `steer` binds the prompt to the saved thread and prior turn. `run` and `steer` use the same capacity and quota checks as cron. A definitive refusal reports the cause and means no prompt was submitted. Release unused reservations and close a newly created idle pane after a definitive refusal. If cleanup is blocked, report that pane ID. If a prompt may have been submitted, report `outcome_unknown` and the pane ID when known. Resolve the receipt before retrying.
+Each pane ID is scoped to the selected profile's Herdr workspace and saved pane binding. `steer` verifies the saved thread and guards submission against a change to the last observed native turn, including turns started in the Codex TUI. `run` and `steer` use the same capacity and quota checks as cron. A definitive refusal reports the cause and means no prompt was submitted. Release unused reservations and close a newly created idle pane after a definitive refusal. If cleanup is blocked, report that pane ID. If a prompt may have been submitted, report `outcome_unknown` and the pane ID when known. Resolve the receipt before retrying.
+
+For direct interaction with a Codex worker, zoom its pane and use the Codex prompt in that pane. The project manager resumes its automation after unlock and verification of the same thread. See [interactive Codex workers](WORKFLOW.md#interactive-codex-workers).
 
 ## Named parameters
 
@@ -60,7 +62,7 @@ Each `--param` takes one `KEY=VALUE` token. Quote the whole token with double qu
 
 `panes` supports `--role ROLE` (manager, worker or quota), `--worker NAME`, `--pane PANE_ID`, `--state STATE` (idle, starting, working, blocked, suspended, done or unknown), `--delivery DELIVERY` (none, unread, read or unknown), `--present yes/no/unknown`, and `--lock locked/unlocked/unknown`. Combine filters to match all supplied criteria. For example, `/project-manager panes --role worker --state done --delivery unread` shows finished results eligible for delivery, oldest completion first with pane ID breaking ties. A tracked result can still appear when its pane is gone.
 
-Zoom-locked panes have effective state `working`. Unlocked panes distinguish an agent waiting for input (`blocked`) from an operating-system suspension (`suspended`). Use `query` to inspect a saved turn result even while its pane is locked. Inspection commands can refresh observations and preserve verified results. They leave delivery, prompt submission, and pane creation and closure to their corresponding operations.
+Zoom-locked panes have effective state `working`. Unlocked panes distinguish an agent waiting for input (`blocked`) from an operating-system suspension (`suspended`). For the manager pane, `panes` uses gateway turn state and reports whether the TUI is attached to the bound conversation. Use `query` to inspect a saved turn result even while its pane is locked. Inspection commands can refresh observations and preserve verified results. They leave delivery, prompt submission, and pane creation and closure to their corresponding operations.
 
 ## Run watchdog operations
 

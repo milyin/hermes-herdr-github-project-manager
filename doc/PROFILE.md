@@ -1,6 +1,8 @@
 # Project-manager profile
 
-Open the configured profile with `hermes -p projectmanager`. The startup integration validates the settings, enables one no-agent cron watchdog for the profile, and runs it immediately to prepare the [manager workspace and panes](WORKFLOW.md#pane-lifecycle). An enabled profile with missing settings starts the setup interview. Opening the profile again reuses the same verified workspace, manager pane and cron job.
+Open the configured profile with `hermes -p projectmanager`. An enabled profile with missing settings starts the setup interview. The startup integration validates the settings, ensures the selected profile's Hermes gateway and scheduler are running, and enables one no-agent cron watchdog for the profile. It runs the watchdog immediately to prepare the workspace and open the [manager conversation in a Hermes TUI pane](WORKFLOW.md#manager-conversation). The managed TUI uses the prepared binding and skips the setup interview.
+
+Setup is ready when the manager pane is attached to its gateway conversation and the profile's scheduler is active. Opening the profile again reuses the verified workspace, manager conversation, pane, and cron job. The gateway and scheduler keep running after the setup session ends. [Hermes cron scheduler](https://hermes-agent.nousresearch.com/docs/guides/cron-troubleshooting#check-3-is-the-gateway-running)
 
 ## Settings
 
@@ -57,11 +59,11 @@ skills:
             github_identity: milyin-hermes
 ```
 
-For this example, configure the `milyin-hermes` launch profile in the agent manager with the App account credentials. Each prompt's `github_identity` parameter names that account.
+For this example, configure the `milyin-hermes` launch profile with the App account credentials. The manager uses that profile in its gateway session and the workers use it in their agent-manager sessions. Each prompt's `github_identity` parameter names that account.
 
 - Each worker has a unique `name`, an `agent` supported by Herdr agent manager, a `model`, an existing absolute `working_directory`, a `description`, and a `prompt_file`. Use lowercase letters, digits and hyphens in worker names.
-- `manager` has the same fields except `agent`. The manager always runs Hermes and uses the configured `model`. If the manager name is omitted, setup uses the local hostname.
-- `launch_profile` is an optional name for a per-pane execution profile supplied by the agent manager. The runtime passes through the name. The agent manager must apply the requested environment and credentials or refuse the launch. Store credentials in the agent manager's credential setup.
+- `manager` has the same fields except `agent`. The manager always runs Hermes in the TUI and uses the configured `model` in its gateway session. If the manager name is omitted, setup uses the local hostname.
+- `launch_profile` is an optional execution profile name. The agent manager applies it to workers, and the gateway integration applies it to the manager session's tool processes. Refuse the launch when the requested environment or credentials cannot be applied. Store credentials in the launch profile's credential setup.
 - `max_working_panes` is a positive integer. It counts workers that are starting, running, blocked or suspended mid-turn, possibly still running, or whose pane is locked or has an unverified lock. The manager pane, quota receiver and verified unlocked finished workers are outside that count.
 
 ## Prompt files
