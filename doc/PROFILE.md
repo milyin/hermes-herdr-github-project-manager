@@ -26,7 +26,6 @@ skills:
         name: projectmanager
         model: YOUR_HERMES_MODEL
         working_directory: /absolute/path/to/manager
-        launch_profile: milyin-hermes
         description: Manage the repository and its wiki dashboard
         prompt_file: skills/hermes-herdr-github-project-manager/doc/MANAGER_PROMPT.md
         parameters:
@@ -40,7 +39,6 @@ skills:
           agent: codex
           model: YOUR_CODEX_MODEL
           working_directory: /absolute/path/to/implementer-checkout
-          launch_profile: milyin-hermes
           description: Implement issues and address PR feedback
           prompt_file: skills/hermes-herdr-github-project-manager/doc/IMPLEMENTER_PROMPT.md
           parameters:
@@ -53,7 +51,6 @@ skills:
           agent: codex
           model: YOUR_CODEX_MODEL
           working_directory: /absolute/path/to/reviewer-checkout
-          launch_profile: milyin-hermes
           description: Review the exact PR head and report findings
           prompt_file: skills/hermes-herdr-github-project-manager/doc/REVIEWER_PROMPT.md
           parameters:
@@ -64,11 +61,11 @@ skills:
             github_identity: milyin-hermes
 ```
 
-For this example, configure the `milyin-hermes` launch profile with the App account credentials. The manager uses that profile in its gateway session and the workers use it in their agent-manager sessions. Each prompt's `github_identity` parameter names that account.
+For this example, `github_identity` tells the manager and workers to use the `milyin-hermes` App account. It is a prompt parameter. The workflow reports authentication or push failures as blockers for the operator.
 
 - Each worker has a unique `name`, an `agent` supported by Herdr agent manager, a `model`, an existing absolute `working_directory`, a `description`, and a `prompt_file`. Use lowercase letters, digits and hyphens in worker names. The working directory is the default for `run`. A workflow can supply a separate directory for each pane it retains.
 - `manager` has the same fields except `agent`. The manager always runs Hermes in the TUI and uses the configured `model` in its gateway session. If the manager name is omitted, setup uses the local hostname.
-- `launch_profile` is an optional execution profile name. The agent manager applies it to workers, and the gateway integration applies it to the manager session's tool processes. Refuse the launch when the requested environment or credentials cannot be applied. Store credentials in the launch profile's credential setup.
+- `launch_profile` is an optional execution profile name. The agent manager applies it to workers, and the gateway integration applies it to the manager session's tool processes. Refuse the launch if the requested execution profile cannot be applied.
 - `max_working_panes` is a positive integer. It counts workers that are starting, running, blocked or suspended mid-turn, possibly still running, or whose pane is locked or has an unverified lock. The manager pane, quota receiver and verified unlocked finished workers are outside that count.
 
 ## Prompt files

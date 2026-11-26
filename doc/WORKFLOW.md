@@ -20,7 +20,7 @@ Bind the profile, exact Herdr pane, and gateway conversation before enabling sch
 
 ### Gateway requirements
 
-- The gateway must let the engine verify the TUI attachment and query the exact bound session's state without starting a model turn. Apply a requested manager launch profile to the gateway session's tool execution environment. Refuse setup if the environment and credentials cannot be applied. Keep credentials scoped to the session and its tool processes.
+- The gateway must let the engine verify the TUI attachment and query the exact bound session's state without starting a model turn. Apply a requested manager launch profile to the gateway session's tool execution environment. Refuse setup if the requested execution profile cannot be applied.
 - For watchdog messages, the gateway must check that the bound session is idle and accept its next turn in one operation. If an operator turn or a queued turn already occupies the next place, return a definitive refusal. Leave the watchdog message unqueued for a later tick.
 - The gateway must record admission in its conversation history under a caller-supplied event ID before executing the turn. Return a receipt identifying the conversation and accepted turn. Reusing the same ID for the same message returns the original receipt. Refuse reuse with different content. Support receipt lookup in that history after gateway restart.
 
@@ -32,7 +32,7 @@ The engine registers its tools and supplies their names and argument schemas to 
 
 ## Interactive Codex workers
 
-Give each Codex worker one live app-server thread. The agent manager starts the app server with the worker's launch profile, opens a thread without submitting a turn, and starts a Codex TUI in the worker pane attached to that exact thread. Use a private local connection, such as `codex --remote unix://SOCKET resume THREAD_ID` on a system with Unix socket support. The agent manager submits work and observes turn events through the same app server. Verify the attachment before sending the first task. [Codex App Server](https://developers.openai.com/codex/app-server) · [Codex TUI session client](https://github.com/openai/codex/blob/rust-v0.171.0/codex-rs/tui/src/app_server_session.rs)
+Give each Codex worker one live app-server thread. The agent manager starts the app server with the worker's launch profile if configured, opens a thread without submitting a turn, and starts a Codex TUI in the worker pane attached to that exact thread. Use a private local connection, such as `codex --remote unix://SOCKET resume THREAD_ID` on a system with Unix socket support. The agent manager submits work and observes turn events through the same app server. Verify the attachment before sending the first task. [Codex App Server](https://developers.openai.com/codex/app-server) · [Codex TUI session client](https://github.com/openai/codex/blob/rust-v0.171.0/codex-rs/tui/src/app_server_session.rs)
 
 The operator can read the job transcript, ask questions, give instructions, and respond to approval requests in the pane using the Codex TUI. Zoom the pane to take control. While zoomed, hold automated submissions and result delivery for that worker. A running turn can continue, and the operator can steer or interrupt it through Codex. The app server applies the worker's configured execution profile to turns from both clients. Deliver approval requests to the TUI even for turns started by the agent manager, so the operator can decide.
 
