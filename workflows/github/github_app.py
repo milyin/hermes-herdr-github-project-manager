@@ -89,27 +89,26 @@ class Config:
     key: Path
 
     @classmethod
-    def read(cls, path, repository, launcher_name):
-        if path is None:
-            if not SLUG.fullmatch(launcher_name):
-                raise GitHubError('Install the launcher as the App slug or supply --config')
-            settings_dir = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config')
-            path = settings_dir / 'herdr-project-manager' / 'github' / f'{launcher_name}.json'
-        with private_file(path.expanduser()) as source:
+    def read(cls, path, repository=None, launcher_name=None):
+        if not path.is_absolute():
+            raise GitHubError('Configure an absolute path to the App configuration')
+        with private_file(path) as source:
             settings = json.load(source)
         slug = settings['app_slug']
         app_id = str(settings['app_id'])
         if not SLUG.fullmatch(slug) or not re.fullmatch(r'[1-9][0-9]*', app_id):
             raise GitHubError('Configure a valid GitHub App slug and numeric App ID')
-        if SLUG.fullmatch(launcher_name) and launcher_name != slug:
+        if launcher_name is not None and SLUG.fullmatch(launcher_name) and launcher_name != slug:
             raise GitHubError('The installed launcher name and configured App slug differ')
-        if (not REPOSITORY.fullmatch(repository) or repository.split('/')[1] in {'.', '..'}
-                or repository != settings['repository']):
+        configured_repo = settings['repository']
+        if not REPOSITORY.fullmatch(configured_repo) or configured_repo.split('/')[1] in {'.', '..'}:
+            raise GitHubError('Configure a valid App repository')
+        if repository is not None and repository != configured_repo:
             raise GitHubError('The target repository differs from the configured App scope')
-        key = Path(settings['private_key']).expanduser()
+        key = Path(settings['private_key'])
         if not key.is_absolute():
             raise GitHubError('Configure an absolute path to the App private key')
-        return cls(slug, app_id, repository, key)
+        return cls(slug, app_id, configured_repo, key)
 
 
 def jwt(config):
@@ -277,10 +276,11 @@ def check_git_config(env):
             raise GitHubError('Git configuration contains a transport or credential override')
 
 
-def main(argv=None):
+def main(argv=None, *, config_path=None):
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument('--repo', required=True)
-    parser.add_argument('--config', type=Path)
+    if config_path is None:
+        parser.add_argument('--config', type=Path, required=True)
     commands = parser.add_subparsers(dest='action', required=True)
     commands.add_parser('status')
     add_arguments(commands.add_parser('merge-reviewed'))
@@ -288,7 +288,8 @@ def main(argv=None):
         commands.add_parser(name).add_argument('native_args', nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     try:
-        config = Config.read(args.config, args.repo, Path(sys.argv[0]).name)
+        config = Config.read(config_path if config_path is not None else args.config,
+                             args.repo, Path(sys.argv[0]).name)
         installation = authenticate(config)
         if args.action == 'status':
             print(json.dumps(installation.status()))

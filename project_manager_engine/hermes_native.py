@@ -5,7 +5,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import re
 import secrets
 import shutil
 import socket
@@ -79,44 +78,6 @@ class Native:
 
     def configure(self, settings):
         self.settings = settings
-
-    def setup_environment(self, agent, cwd, parameters, *, target, workspace):
-        manager = agent is self.settings.manager
-        request = dict(argv=isolated_python(self.settings.setup_hook), cwd=cwd, stdin=json.dumps(dict(
-            agent=agent.name, backend=agent.backend, manager=manager, working_directory=cwd, parameters=parameters)))
-        unverified = f'The bound {agent.backend} runtime could not verify environment setup for {agent.name}'
-        try:
-            if manager:
-                sid = self.verify_manager_target(target)
-                binding = dict(session_id=sid, cwd=cwd)
-                reply = self.gateway('setup_environment', sid, request)
-            else:
-                pane, thread = target['pane_id'], target['thread_id']
-                binding = dict(pane_id=pane, thread_id=thread, cwd=cwd)
-                reply = self.agent('setup-environment', workspace, pane, '--thread-id', thread,
-                                   '--request-stdin', payload=request)
-        except (Hold, KeyError) as exc:
-            raise Hold('setup_environment_unverifiable', unverified) from exc
-        if (not isinstance(reply, dict) or reply.get('binding') != binding
-                or type(reply.get('returncode')) is not int or not isinstance(reply.get('stdout'), str)
-                or len(reply['stdout']) > 16384):
-            raise Hold('setup_environment_unverifiable', unverified)
-        failure = f'Environment setup failed for {agent.name}'
-        try:
-            values = json.loads(reply['stdout'])
-        except ValueError as exc:
-            raise Hold('setup_hook_failed', failure) from exc
-        if reply['returncode']:
-            if isinstance(values, dict) and isinstance(values.get('error'), str) and values['error'].strip():
-                failure = f'{failure}. {values["error"]}'
-            raise Hold('setup_hook_failed', failure)
-        if (not isinstance(values, dict) or values.keys() != agent.prompt.setup_keys
-                or any(not isinstance(value, str) or '\0' in value for value in values.values())):
-            raise Hold('setup_hook_failed', f'Environment setup for {agent.name} returned invalid prompt values')
-        receipt = reply.get('setup_receipt')
-        if not isinstance(receipt, str) or not re.fullmatch(r'[a-zA-Z0-9_.-]{1,128}', receipt):
-            raise Hold('setup_environment_unverifiable', unverified)
-        return values, receipt
 
     def script(self, skill, filename):
         skill_dir = self.home / 'skills' / skill
@@ -227,9 +188,6 @@ class Native:
                     sid, *rest = args
                     if action == 'info':
                         return await gateway.rpc('session.info', session_id=sid, _timeout=10)
-                    if action == 'setup_environment':
-                        request, = rest
-                        return await gateway.rpc('session.environment.setup', session_id=sid, **request, _timeout=40)
                     snapshot = await gateway.rpc('session.resume', session_id=sid, omit_messages=True, _timeout=10)
                     if not isinstance(snapshot, dict) or snapshot.get('session_id') != sid:
                         raise Hold('session_changed', 'Hermes returned a different manager conversation')
@@ -245,12 +203,11 @@ class Native:
                         return {}
                     if not idle_snapshot(snapshot):
                         raise Hold('manager_busy', 'The Hermes conversation has running or queued input')
-                    message, *receipts = rest
-                    setup = {'setup_receipt': receipts[0]} if receipts else {}
+                    message, = rest
                     submission_id = WATCHDOG_INPUT + secrets.token_hex(16)
                     submit_attempted = True
                     receipt = await gateway.rpc('prompt.submit', session_id=sid, text=message,
-                                                submission_id=submission_id, _timeout=15, **setup)
+                                                submission_id=submission_id, _timeout=15)
                     ref = receipt.get('ref') if isinstance(receipt, dict) else None
                     if (not isinstance(ref, dict) or ref.get('session_id') != sid
                             or not isinstance(receipt.get('admission_id'), str)):
@@ -368,9 +325,8 @@ class Native:
             raise Hold('manager_locked', 'The operator has locked the manager pane')
         return sid
 
-    def submit(self, row, message, *, setup_receipt=None):
-        receipt = () if setup_receipt is None else (setup_receipt,)
-        return self.gateway('submit', self.verify_manager_target(row), message, *receipt)
+    def submit(self, row, message):
+        return self.gateway('submit', self.verify_manager_target(row), message)
 
     def recover_manager(self, row):
         return self.gateway('recover_admission', self.verify_manager_target(row))

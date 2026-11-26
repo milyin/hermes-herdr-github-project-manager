@@ -6,7 +6,7 @@ import os
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
-from .settings import Hold, SETUP_PREFIX, Settings, directory, raw_settings
+from .settings import Hold, Settings, directory, raw_settings
 
 
 WORKER_OPERATIONS = ('run', 'steer', 'query', 'mark_read', 'set_comment', 'close',
@@ -268,15 +268,15 @@ class Engine:
 
     def run(self, name, prompt='', parameters=None, working_directory=None):
         setting = self.worker(name)
-        values = setting.prompt.parameters(parameters)
+        text, values = setting.prompt.render(parameters)
         if not isinstance(prompt, str):
             raise Hold('invalid_prompt', 'Prompt must be text')
         cwd = setting.cwd if working_directory is None else directory(working_directory)
         self.native.preflight(setting, cwd)
+        self.workspace(create=True)
         rows = self.panes(role='worker')['panes']
         account = self.check_admission(setting, rows=rows)
         self.check_directory(cwd, rows)
-        self.workspace(create=True)
         try:
             pane = self.native.provision(self.workspace_id, setting, cwd)['pane_id']
         except Hold as exc:
@@ -284,19 +284,8 @@ class Engine:
                 raise Hold('outcome_unknown', str(exc), **exc.details) from exc
             raise
         try:
-            setup_receipt = {}
-            if self.settings.setup_hook:
-                target = self.tracked(pane)
-                if target.get('worker') != setting.name or target.get('working_directory') != cwd:
-                    raise Hold('setup_environment_unverifiable', 'The worker execution binding could not be verified')
-                setup, receipt = self.native.setup_environment(setting, cwd, values, target=target,
-                                                                workspace=self.workspace_id)
-                values = values | setup
-                setup_receipt['setup_receipt'] = receipt
-            text = setting.prompt.fill(values)
             self.rename(pane, 'status', f'{setting.tag}:RUN')
-            body = dict(prompt=text + ('\n\n' + prompt if prompt else ''), parameters=values, account=account,
-                        **setup_receipt)
+            body = dict(prompt=text + ('\n\n' + prompt if prompt else ''), parameters=values, account=account)
             return issued(self.agent('run', pane, '--agent', setting.backend, '--cwd', cwd,
                                      '--model', setting.model, '--request-stdin', payload=body), pane)
         except Hold as exc:
@@ -319,12 +308,10 @@ class Engine:
             raise Hold('invalid_prompt', 'Follow-up must contain text')
         worker = self.worker(row['worker'])
         account = self.check_admission(worker)
-        setup_receipt = self.followup_setup(worker, row)
         self.rename(pane_id, 'status', f'{worker.tag}:RUN')
         try:
             return issued(self.agent('steer', pane_id, '--thread-id', row['thread_id'], '--return-admission',
-                                     '--request-stdin', payload=dict(prompt=prompt, account=account,
-                                                                     **setup_receipt)), pane_id)
+                                     '--request-stdin', payload={'prompt': prompt, 'account': account}), pane_id)
         except Hold as exc:
             if exc.code not in ('outcome_unknown', 'transport_error', 'invalid_response',
                                 'codex_disconnected', 'hermes_disconnected'):
@@ -332,29 +319,6 @@ class Engine:
                 if (current.get('turn_id'), current.get('thread_id')) == (row.get('turn_id'), row['thread_id']):
                     self.rename(pane_id, 'status', row['status'])
             raise
-
-    def followup_setup(self, worker, row):
-        turn = row.get('turn_id')
-        if turn is None and self.settings.setup_hook is None:
-            return {}
-        if turn is None:
-            raise Hold('setup_hook_failed', 'The worker has no verified environment setup')
-        prior = self.agent('result', row['pane_id'], '--turn-id', turn)
-        values = prior.get('parameters')
-        if (prior.get('state') != 'done' or prior.get('thread_id') != row['thread_id'] or prior.get('turn_id') != turn
-                or not isinstance(values, dict)):
-            raise Hold('setup_hook_failed', 'The worker has no verified environment setup')
-        saved = {key: value for key, value in values.items() if key.startswith(SETUP_PREFIX)}
-        current, receipt = {}, None
-        if self.settings.setup_hook:
-            if not row.get('working_directory'):
-                raise Hold('setup_hook_failed', 'The worker has no verified working directory')
-            parameters = {key: value for key, value in values.items() if key not in saved}
-            current, receipt = self.native.setup_environment(worker, row['working_directory'], parameters,
-                                                             target=row, workspace=self.workspace_id)
-        if saved != current:
-            raise Hold('setup_hook_failed', 'The worker environment changed. Start a new worker run')
-        return {} if receipt is None else {'setup_receipt': receipt}
 
     def query(self, pane_id, turn_id=None):
         row = self.tracked(pane_id)
@@ -510,20 +474,12 @@ class Engine:
                     or current['delivery'] != 'unread' or current['pending_closure']
                     or (current.get('attention') or {}).get('attention_id') != event.get('attention_id')):
                 return {'action': 'report_held'}
-        setting = self.settings.manager
-        values = setting.prompt.parameters()
-        setup_receipt = {}
-        if self.settings.setup_hook:
-            setup, receipt = self.native.setup_environment(setting, setting.cwd, values, target=refreshed[0],
-                                                           workspace=self.workspace_id)
-            values = values | setup
-            setup_receipt['setup_receipt'] = receipt
-        manager_prompt = setting.prompt.fill(values)
+        manager_prompt, _ = self.settings.manager.prompt.render()
         workers = {worker.name: worker.description for worker in self.settings.workers.values()}
         payload = (manager_prompt + '\n\nConfigured workers: ' + json.dumps(workers, ensure_ascii=False)
                    + '\n\nWatchdog event (data):\n' + json.dumps(event, ensure_ascii=False))
         try:
-            receipt = self.native.submit(refreshed[0], payload, **setup_receipt)
+            receipt = self.native.submit(refreshed[0], payload)
         except Hold as exc:
             if exc.code in ('manager_busy', 'manager_locked', 'manager_detached', 'manager_suspended'):
                 return {'action': 'manager_held', 'reason': exc.code}

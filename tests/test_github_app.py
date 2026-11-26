@@ -5,21 +5,23 @@ from io import StringIO
 import json
 import os
 from pathlib import Path
+import runpy
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+from workflows.github import github_app
 from workflows.github.github_app import (
     Config, GitHubError, Installation, cli_environment, git_command, github_command, main,
 )
+from workflows.github.install_proxy import install_proxy
 
 
 APP = 'another-app'
 REPO = 'other-owner/other-repository'
 URL = f'https://github.com/{REPO}.git'
-ROOT = Path(__file__).resolve().parents[1]
 
 
 class AppLauncher(unittest.TestCase):
@@ -27,9 +29,12 @@ class AppLauncher(unittest.TestCase):
         temporary = TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.home = Path(temporary.name)
-        self.path = self.home / 'app.json'
+        self.path = self.home / 'app settings.json'
+        self.key = self.home / 'key.pem'
+        self.key.write_text('fixture-key')
+        self.key.chmod(0o600)
         self.path.write_text(json.dumps(dict(app_slug=APP, app_id=123, repository=REPO,
-                                             private_key=str(self.home / 'key.pem'))))
+                                             private_key=str(self.key))))
         self.path.chmod(0o600)
         self.responses = {
             '/app': {'slug': APP, 'id': 123},
@@ -80,13 +85,60 @@ class AppLauncher(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'private files'):
             Config.read(self.path, REPO, APP)
 
-    def test_installed_symlink_resolves_workflow_module(self):
-        launcher = self.home / APP
-        launcher.symlink_to(ROOT / 'workflows' / 'github' / 'github_app.py')
-        env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1', XDG_CONFIG_HOME=str(self.home))
-        result = subprocess.run([str(launcher), '--repo', REPO, 'merge-reviewed', '--help'], env=env,
-                                capture_output=True, text=True, check=True)
+    def test_proxy_runs_the_bundled_launcher_and_rejects_config_overrides(self):
+        proxy = install_proxy(self.path, self.home / 'local bin')
+        self.assertEqual(proxy.name, APP)
+        self.assertEqual(proxy.stat().st_mode & 0o777, 0o700)
+        self.assertNotIn(self.key.read_text(), proxy.read_text())
+        result = subprocess.run([str(proxy), '--repo', REPO, 'merge-reviewed', '--help'],
+                                capture_output=True, text=True, check=True, timeout=5)
         self.assertIn('--reviewed-head', result.stdout)
+        result = subprocess.run([str(proxy), '--repo', REPO, '--config', str(self.path), 'status'],
+                                capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, '')
+
+    def test_proxy_uses_the_same_private_configuration_in_different_xdg_environments(self):
+        proxy = install_proxy(self.path, self.home / 'bin')
+        for role in ('manager', 'worker'):
+            with self.subTest(role=role):
+                output, errors = StringIO(), StringIO()
+                with (patch.dict(os.environ, {'XDG_CONFIG_HOME': str(self.home / role)}),
+                      patch.dict(sys.modules, {'github_app': github_app}),
+                      patch.object(sys, 'path', sys.path.copy()),
+                      patch.object(sys, 'argv', [str(proxy), '--repo', REPO, 'status']),
+                      redirect_stdout(output), redirect_stderr(errors),
+                      patch.object(github_app, 'jwt', return_value='fixture-jwt') as sign,
+                      patch.object(github_app, 'request', side_effect=lambda method, path, token, data=None:
+                                   (self.responses[path], '')), self.assertRaises(SystemExit) as finished):
+                    runpy.run_path(str(proxy), run_name='__main__')
+                self.assertEqual(finished.exception.code, 0, errors.getvalue())
+                self.assertEqual(json.loads(output.getvalue())['actor'], APP + '[bot]')
+                self.assertNotIn('fixture-token', output.getvalue())
+                self.assertEqual(errors.getvalue(), '')
+                sign.assert_called_once_with(Config(APP, '123', REPO, self.key))
+
+    def test_installing_a_proxy_preserves_existing_commands_and_private_file_checks(self):
+        proxy = install_proxy(self.path, self.home / 'bin')
+        original = proxy.read_text()
+        with self.assertRaisesRegex(GitHubError, 'already exists'):
+            install_proxy(self.path, proxy.parent)
+        self.assertEqual(proxy.read_text(), original)
+        self.key.chmod(0o644)
+        with self.assertRaisesRegex(GitHubError, 'private files'):
+            install_proxy(self.path, self.home / 'other-bin')
+
+    def test_installs_distinct_commands_for_distinct_app_configs(self):
+        second = self.home / 'second.json'
+        settings = json.loads(self.path.read_text())
+        second.write_text(json.dumps(settings | {'app_slug': 'second-app', 'app_id': 456}))
+        second.chmod(0o600)
+        bin_dir = self.home / 'bin'
+        first_proxy = install_proxy(self.path, bin_dir)
+        second_proxy = install_proxy(second, bin_dir)
+        self.assertEqual({entry.name for entry in bin_dir.iterdir()}, {APP, 'second-app'})
+        self.assertIn(repr(str(self.path)), first_proxy.read_text())
+        self.assertIn(repr(str(second)), second_proxy.read_text())
 
     def test_native_gh_runs_with_scoped_credentials_and_scrubs_the_personal_environment(self):
         with (patch.object(sys, 'argv', [APP]),

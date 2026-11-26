@@ -34,7 +34,7 @@ Use `/project-manager` or Hermes cron history to verify the watchdog. A successf
 
 1. Choose a directory for the workflow. Write a manager prompt that defines how to find work, delegate to configured workers, handle reports and track progress. Write one prompt per worker role that describes what to do and what to report. The [workflow specification](WORKFLOW.md) defines the tools and worker event format available to every workflow.
 2. Use the [local workflow profile](../workflows/hello-world/README.md#profile-settings) as a starting point for the manager and worker records. Set each `prompt_file` to your own file and declare its template parameters. Name the worker roles the manager prompt will call.
-3. Configure and verify any service access before enabling workflow operations. Use an [environment setup hook](#environment-setup-hooks) to prepare or check what each managed turn needs.
+3. Configure and verify any service access in the manager or worker execution environment before enabling workflow operations. Define checks in your workflow prompts so the actors can report unavailable access.
 4. Run `/project-manager` and verify a sample assignment and its result before relying on scheduled work.
 
 ## Settings
@@ -45,19 +45,9 @@ Use `/project-manager` or Hermes cron history to verify the watchdog. A successf
 - `launch_profile` is an optional execution profile name. For Codex workers it selects a native Codex profile for both the app server and the TUI. Select a profile with the access your workflow requires. A manager execution profile requires Hermes to support per-session application and verification. The backend refuses a requested launch profile it cannot apply.
 - `max_working_panes` is a positive integer. It counts workers that are starting, running, blocked or suspended mid-turn, possibly still running, or whose pane is locked or has an unverified lock. The manager pane, quota receiver and verified unlocked finished workers are outside that count.
 
-## Environment setup hooks
-
-Set `setup_hook` in the project-manager configuration to register a trusted Python script for the selected workflow. Relative paths resolve from the Hermes profile. The bound execution runtime runs the hook in the agent's working directory before a managed manager turn, the first worker turn, or a worker follow-up. The engine sends a JSON object with `agent`, `backend`, `manager` (a boolean), `working_directory`, and `parameters` on standard input.
-
-On success, write a single JSON object to standard output and exit zero. A prompt may reference hook output using `{{setup_NAME}}` placeholders. The `setup_` prefix is reserved for hook output. Return exactly those fields as strings, or return `{}` for a prompt with no hook values. Use non-secret values such as a verified command path. The engine records these values with the worker's run and checks them before a follow-up. Start a new worker run if they change.
-
-To block a turn, exit nonzero and return an `error` string in a JSON object. The engine reports it to the caller. Keep the hook safe to rerun and finish within 35 seconds.
-
-Hook-enabled workflows require a Hermes gateway and agent manager that support [bound environment verification](WORKFLOW.md#bound-environment-verification). If either runtime cannot verify its actual turn environment, the engine holds that turn. The worker pane attaches before its first check so the runtime can verify its working directory, launch profile and execution policy.
-
 ## Prompt files
 
-Resolve a relative `prompt_file` path from the Hermes profile directory. Declare each `{{KEY}}` in that record's `parameters` mapping or supply it from the setup hook as described above. Keys are case-sensitive identifiers made of letters, digits and underscores and must start with a letter or underscore. An undeclared or malformed reference is a configuration error.
+Resolve a relative `prompt_file` path from the Hermes profile directory. Declare every `{{KEY}}` used by a prompt in that record's `parameters` mapping. Keys are case-sensitive identifiers made of letters, digits and underscores and must start with a letter or underscore. An undeclared or malformed reference is a configuration error.
 
 Set each manager parameter to its value in the profile. For a worker, a scalar value sets the default and `null` declares a required input without a default. [Named parameters on `run`](COMMANDS.md#named-parameters) supply required values or override defaults for that run. An explicit empty string counts as supplied. The engine accepts only declared keys used in the selected worker's template. It rejects duplicate or unknown arguments and reports missing required inputs before creating the pane.
 

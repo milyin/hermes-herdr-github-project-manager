@@ -4,7 +4,6 @@ from contextlib import redirect_stdout
 from copy import deepcopy
 from io import StringIO
 import json
-import os
 from pathlib import Path
 import re
 import shlex
@@ -53,19 +52,15 @@ class GitHubWorkflowPrompt(unittest.TestCase):
         config['manager']['parameters'].update(REPO=REPO, github_identity=APP)
         for agent in (config['manager'], *config['workers']):
             agent['working_directory'] = temporary.name
-        prompt = Settings.read(home, config).manager.prompt.render(setup={'setup_launcher': APP})[0]
+        prompt = Settings.read(home, config).manager.prompt.render()[0]
         procedure = prompt.split('## Merging conditions\n', 1)[1].split('## Worker result\n', 1)[0]
         command = re.search(r'```bash\n(.*?)\n\s*```', procedure, re.DOTALL)[1].replace('\\\n', '')
         self.command = Template(command)
         self.procedure = procedure
-        config_path = home / 'herdr-project-manager' / 'github' / f'{APP}.json'
-        config_path.parent.mkdir(parents=True)
-        config_path.write_text(json.dumps(dict(app_slug=APP, app_id=77, repository=REPO,
-                                               private_key=str(home / 'app.pem'))))
-        config_path.chmod(0o600)
-        self.env = patch.dict(os.environ, {'XDG_CONFIG_HOME': str(home)})
-        self.env.start()
-        self.addCleanup(self.env.stop)
+        self.config_path = home / f'{APP}.json'
+        self.config_path.write_text(json.dumps(dict(app_slug=APP, app_id=77, repository=REPO,
+                                                   private_key=str(home / 'app.pem'))))
+        self.config_path.chmod(0o600)
         self.pull = dict(author=AUTHOR, headRefOid=HEAD, isDraft=False, state='OPEN', baseRefName='main',
                          autoMergeRequest=None, isInMergeQueue=False, isMergeQueueEnabled=False,
                          mergeable='MERGEABLE',
@@ -140,7 +135,7 @@ class GitHubWorkflowPrompt(unittest.TestCase):
         with (patch.object(sys, 'argv', [APP]), redirect_stdout(stdout),
               patch('workflows.github.github_app.jwt', return_value='app-proof'),
               patch('workflows.github.github_app.request', side_effect=self.request)):
-            self.assertEqual(main(args), 0)
+            self.assertEqual(main(args, config_path=self.config_path), 0)
         return json.loads(stdout.getvalue())
 
     def assert_hold(self, status='Need attention', **options):

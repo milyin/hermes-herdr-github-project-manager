@@ -121,12 +121,6 @@ The rule is fixed for each current window. The usage allowance equals the fracti
 
 Use the skills' public caller APIs. The engine owns pane roles, result delivery, and the rule that a zoom-locked pane counts as working.
 
-### Bound environment verification
-
-With a configured `setup_hook`, the engine sends `argv`, `cwd` and `stdin` to `session.environment.setup` for the bound Hermes session or to `setup-environment --thread-id THREAD --request-stdin` for the exact worker pane. The runtime must run that command under the same execution policy and environment as the upcoming turn's tools, including the configured launch profile and any sandbox. It must verify the target is idle and return `binding`, `returncode`, and `stdout`. The binding is `{session_id, cwd}` for Hermes and `{pane_id, thread_id, cwd}` for workers.
-
-On success, the runtime issues a short-lived, single-use `setup_receipt`. The engine passes it with `prompt.submit`, `run`, or `steer`. The runtime must consume it when admitting that turn and refuse admission if the execution context changed. Hook output supplies the prompt values. The receipt travels only to the admission API. A missing operation or unverified binding holds the turn.
-
 ### Herdr pane manager
 
 The pane manager supplies workspace and pane identity, layout, and guarded mutations. [Herdr pane manager skill](https://github.com/milyin/hermes-herdr-pane-manager) · [Caller API](https://github.com/milyin/hermes-herdr-pane-manager/blob/main/references/api.md)
