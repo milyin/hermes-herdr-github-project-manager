@@ -1,0 +1,17 @@
+name: hermes-herdr-github-project-manager
+version: "0.2.0"
+description: Hermes commands and tools for a Herdr project manager
+provides_hooks:
+  - on_session_open
+  - on_session_start
+provides_tools:
+  - project_manager_run
+  - project_manager_steer
+  - project_manager_query
+  - project_manager_mark_read
+  - project_manager_set_comment
+  - project_manager_close
+  - project_manager_workers
+  - project_manager_panes
+  - project_manager_capacity
+  - project_manager_quota
