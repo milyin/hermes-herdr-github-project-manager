@@ -15,9 +15,10 @@ WORKER_OPERATIONS = ('run', 'steer', 'query', 'mark_read', 'set_comment', 'close
                      'workers', 'panes', 'capacity', 'quota')
 COMMANDS = (*WORKER_OPERATIONS, 'prepare_panes', 'tick')
 OCCUPIED = {'starting', 'working', 'blocked', 'suspended', 'unknown'}
-EXCERPT_LIMIT = 12000
 PANE_BINDING = ('instance', 'workspace_id', 'pane_id', 'terminal_id', 'worker', 'thread_id')
 CLOSE_UNCERTAIN = {'outcome_unknown', 'transport_error', 'invalid_response', 'local_error', 'pane_not_found'}
+# Match the agent manager's text input limit before touching the workspace.
+MAX_WORKER_PROMPT_BYTES = 32 * 1024
 # The receiver reports deadline_elapsed before any prompt bytes are written.
 # Partial writes, reply deadlines and failures after admission use other codes.
 RUN_REFUSALS = {'user_locked', 'lock_unknown', 'worker_unavailable', 'turn_active', 'already_started',
@@ -44,6 +45,19 @@ def profile_lock(home):
 
 def identifier(value):
     return isinstance(value, str) and bool(value.strip())
+
+
+def validate_worker_prompt(prompt):
+    refusal = dict(phase='validation', admission='not_attempted')
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise Hold('invalid_prompt', 'Worker prompt must be nonempty text', **refusal)
+    try:
+        size = len(prompt.encode('utf-8'))
+    except UnicodeEncodeError as exc:
+        raise Hold('invalid_prompt', 'Worker prompt must be valid UTF-8', **refusal) from exc
+    if size > MAX_WORKER_PROMPT_BYTES:
+        raise Hold('invalid_prompt', f'Worker prompt exceeds {MAX_WORKER_PROMPT_BYTES} UTF-8 bytes',
+                   prompt_bytes=size, max_prompt_bytes=MAX_WORKER_PROMPT_BYTES, **refusal)
 
 
 def fingerprint(value):
@@ -383,19 +397,24 @@ class Engine:
         return dict(accounts=reports, hold=any(report['hold'] for report in reports),
                     applicable=bool(groups))
 
-    def occupied(self, rows):
-        return [row['pane_id'] for row in rows if row['state'] in OCCUPIED]
+    def worker_slots(self, rows):
+        occupied_states = {row['pane_id']: row['state'] for row in rows if row['state'] in OCCUPIED}
+        return dict(maximum=self.settings.limit, available=max(0, self.settings.limit - len(occupied_states)),
+                    occupied_states=occupied_states)
+
+    def worker_rows(self, layout):
+        return [row for raw in layout if raw.get('status') not in ('MGR', 'QUOTA')
+                and (row := self.row(raw)) and row['role'] == 'worker']
 
     def capacity(self):
         layout = self.layout()
-        rows = [row for raw in layout if (row := self.row(raw)) and row['role'] == 'worker']
-        occupied = self.occupied(rows)
-        available = max(0, self.settings.limit - len(occupied))
+        rows = self.worker_rows(layout)
+        slots = self.worker_slots(rows)
         quota = self.quota()
         held = {name: account['hold'] for account in quota['accounts'] for name in account['workers']}
         ready = {}
         for setting in self.settings.workers.values():
-            reason = 'capacity' if not available else held.get(setting.name)
+            reason = 'capacity' if not slots['available'] else held.get(setting.name)
             if not reason:
                 try:
                     self.check_directory(setting.cwd, rows)
@@ -416,8 +435,7 @@ class Engine:
                 unresolved.append(dict(
                     {key: record[key] for key in ('instance', 'workspace_id', 'pane_id', 'terminal_id', 'worker', 'thread_id')},
                     admission='unknown', presence=presence))
-        return dict(maximum=self.settings.limit, occupied=occupied, available=available, workers=ready,
-                    unresolved_launches=unresolved)
+        return dict(slots, occupied=list(slots['occupied_states']), workers=ready, unresolved_launches=unresolved)
 
     def worker_pane(self, pane_id):
         for raw in self.layout():
@@ -448,7 +466,7 @@ class Engine:
 
     def check_admission(self, setting, *, rows=None):
         rows = self.panes(role='worker')['panes'] if rows is None else rows
-        if len(self.occupied(rows)) >= self.settings.limit:
+        if not self.worker_slots(rows)['available']:
             raise Hold('capacity', 'No working pane slots are available')
         quota = self.quota(setting.name)
         if quota['hold']:
@@ -468,9 +486,10 @@ class Engine:
         setting = self.worker(name)
         text, values = setting.prompt.render(parameters)
         if not isinstance(prompt, str):
-            raise Hold('invalid_prompt', 'Prompt must be text')
-        cwd = setting.cwd if working_directory is None else directory(working_directory)
+            raise Hold('invalid_prompt', 'Prompt must be text', phase='validation', admission='not_attempted')
         body = dict(prompt=text + ('\n\n' + prompt if prompt else ''), parameters=values)
+        validate_worker_prompt(body['prompt'])
+        cwd = setting.cwd if working_directory is None else directory(working_directory)
         dispatch = fingerprint([name, body['prompt']])
         pending = private_runtime(self.home) / f'launch-{dispatch}.json'
         if pending in self.launches:
@@ -545,12 +564,11 @@ class Engine:
         self.forget_launch(path)
 
     def steer(self, pane_id, prompt):
+        validate_worker_prompt(prompt)
         row = self.tracked(pane_id)
         if (row['lock'] != 'unlocked' or row['state'] not in ('idle', 'done')
                 or row['pending_closure']):
             raise Hold('not_idle', 'The bound worker pane is unavailable for a follow-up', pane_id=pane_id)
-        if not isinstance(prompt, str) or not prompt.strip():
-            raise Hold('invalid_prompt', 'Follow-up must contain text')
         worker = self.worker(row['worker'])
         account = self.check_admission(worker)
         if launch := self.pane_launch(pane_id):
@@ -790,16 +808,10 @@ class Engine:
                 result = self.query(report['pane_id'], report['turn_id'])
                 if result['state'] != 'done':
                     return {'action': 'report_held'}
-                message = result['message']
-                event.update(type='worker_result', message=message[:EXCERPT_LIMIT])
-                if len(message) > EXCERPT_LIMIT:
-                    event['truncated'] = True
-        else:
-            capacity = self.capacity()
-            if not any(worker['ready'] for worker in capacity['workers'].values()):
-                return dict(action='capacity_held', holds=holds, unresolved_launches=capacity['unresolved_launches'])
-        refreshed = self.panes(role='manager', pane_id=manager['pane_id'])['panes']
-        if len(refreshed) != 1 or not self.manager_idle(refreshed[0]):
+                event.update(type='worker_result', message=result['message'])
+        refreshed = self.panes()['panes']
+        managers = [row for row in refreshed if row['role'] == 'manager' and row['pane_id'] == manager['pane_id']]
+        if len(managers) != 1 or not self.manager_idle(managers[0]):
             return {'action': 'manager_held'}
         if report:
             current = self.tracked(report['pane_id'])
@@ -809,13 +821,28 @@ class Engine:
                 return {'action': 'report_held'}
         manager_prompt, _ = self.settings.manager.prompt.render()
         workers = {worker.name: worker.description for worker in self.settings.workers.values()}
+        # Keep Hermes context references inert while preserving the decoded event.
+        event_data = json.dumps(event, ensure_ascii=False).replace('@', r'\u0040')
         payload = (manager_prompt + '\n\nConfigured workers: ' + json.dumps(workers, ensure_ascii=False)
-                   + '\n\nWatchdog event (data):\n' + json.dumps(event, ensure_ascii=False))
+                   + '\n\nWatchdog event (data):\n' + event_data)
+        if report:
+            slots = self.worker_slots(row for row in refreshed if row['role'] == 'worker')
+        else:
+            capacity = self.capacity()
+            ready = any(worker['ready'] for worker in capacity['workers'].values())
+            # Quota and preflight probes can outlive the worker observations used by capacity().
+            slots = (self.worker_slots(self.worker_rows(self.layout())) if ready else
+                     {key: capacity[key] for key in ('maximum', 'available', 'occupied_states')})
+            if not ready or not slots['available']:
+                return dict(action='capacity_held', holds=holds, unresolved_launches=capacity['unresolved_launches'],
+                            event=event['type'], capacity=slots)
+        diagnostics = dict(event=event['type'], capacity=slots)
         try:
-            receipt = self.native.submit(refreshed[0], payload)
+            receipt = self.native.submit(managers[0], payload)
         except Hold as exc:
             if exc.code in ('manager_busy', 'manager_locked', 'manager_detached', 'manager_suspended'):
-                return {'action': 'manager_held', 'reason': exc.code}
+                return dict(action='manager_held', reason=exc.code, **diagnostics)
+            exc.details.update(diagnostics)
             raise
-        return dict(action='submitted', event=event['type'], admission_id=receipt.get('admission_id'),
+        return dict(action='submitted', admission_id=receipt.get('admission_id'), **diagnostics,
                     **{key: event[key] for key in ('pane_id', 'turn_id', 'attention_id') if key in event})

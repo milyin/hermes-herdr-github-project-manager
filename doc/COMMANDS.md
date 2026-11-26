@@ -34,6 +34,8 @@ Pane preparation and `tick` are available through the operator commands and cron
 
 Query results identify the pane, native turn ID, turn state, delivery state and the named parameters from the worker's run. A confirmed interruption is a finished turn with an interruption message. An unverifiable outcome is `unknown` with its reason.
 
+Worker prompts can be up to 32,768 UTF-8 bytes. `run` counts the rendered template, substituted values, and any appended text including its separator. `steer` counts the supplied follow-up. An oversized prompt returns `invalid_prompt` with `phase: validation`, `admission: not_attempted`, `prompt_bytes`, and `max_prompt_bytes`. The check happens before provisioning or modifying a pane. This refusal consumes no worker capacity. On `steer` it preserves the prior turn and delivery state. [Oversized handoff recovery](WORKFLOW.md#oversized-worker-handoffs)
+
 Each pane ID is scoped to the selected profile's Herdr workspace and verified pane binding. `steer` targets the bound thread and requires it to be idle at admission. `run` and `steer` use the same capacity and quota checks as cron. A provisioning failure includes `phase: provision`, `admission: not_attempted` and the pane ID when available. After submission begins, an ambiguous receipt returns `outcome_unknown` with `admission: unknown` and the pane ID. Use `query` or `capacity` to reconcile the launch before retrying. An unresolved open launch occupies a slot. A verified turn follows normal capacity rules.
 
 Repeated `capacity_held` for a retained `not_attempted` launch calls for direct inspection of the pane in Herdr. If the operator confirms it is unused and closes it, verify absence and worker readiness before retrying. For an unknown admission, `managed_turn_identity_unavailable` means the engine cannot verify whether current attention belongs to the managed turn. The operator can inspect the Codex TUI while the engine holds delivery and replay. Losing the pane does not clear the replay hold.
@@ -52,7 +54,7 @@ The implementer in the [profile example](PROFILE.md#settings) accepts an issue o
 
 ```text
 /project-manager run implementer --param REPO=owner/repository --param ISSUE=owner/repository#42 --param "TASK=Implement the issue and run tests"
-/project-manager run implementer --param REPO=owner/repository --param PR=https://github.com/owner/repository/pull/27 --param "TASK=Address the review feedback"
+/project-manager run reviewer --param SOURCE=/absolute/path/to/draft --param "TASK=Review the introduction"
 ```
 
 Each `--param` takes one `KEY=VALUE` token. Quote the whole token with double quotes for spaces and use `\"` and `\\` inside quoted values for a literal quote and backslash. The handler reads text, with no shell expansion. `--cwd` selects an existing absolute working directory for this run. With options, text after `--` is an optional literal addition to the rendered prompt. In the short form, `run NAME PROMPT` passes the remaining text as the task. See [parameter resolution](PROFILE.md#prompt-files).
@@ -75,4 +77,4 @@ Zoom-locked panes have effective state `working`. Unlocked panes distinguish an 
 | Command | Result and behavior |
 | --- | --- |
 | `/project-manager prepare-panes` | Run the workspace and pane verification, creation and recovery operations shared with cron. Return the workspace, verified panes and holds, including unused launch panes that need operator action. |
-| `/project-manager tick` | Run one complete [cron tick](WORKFLOW.md#cron-tick) in the same order and under the same lock as the scheduled run. Return the action taken or the reason it stopped, including the pane and turn IDs and any attention ID for a submitted report. |
+| `/project-manager tick` | Run one complete [cron tick](WORKFLOW.md#cron-tick) in the same order and under the same lock as the scheduled run. Return the action taken or the reason it stopped. Holds for discovery capacity and gateway submission outcomes include the `event` type and a `capacity` observation with `maximum`, `available`, and `occupied_states` keyed by pane ID. Submitted reports include the pane and turn IDs and any attention ID. |
