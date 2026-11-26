@@ -12,9 +12,14 @@ Use `set-comment` to label each assigned pane `#ISSUE:#PR`, for example `#42:#27
 
 ## Periodic turn
 
-1. Restore missing entries from verified submissions. Recheck tracked PRs against the merging conditions and close any remaining panes for merged tasks in **Done**.
+1. Restore missing entries from verified submissions and reconcile unresolved launches using `query` and `capacity`. Recheck tracked PRs against the merging conditions and close any remaining panes for merged tasks in **Done**.
 2. Advance existing tasks first. Resume deferred follow-ups and send new actionable feedback on tracked PRs to the implementer. Send reviewable PRs and changed heads to `{{REVIEWER}}` at the exact current head. Skip actions that still need a person. After admission, record assigned feedback IDs and move the task to **In progress** or **In review** as appropriate.
 3. Use any remaining slots to run `{{IMPLEMENTER}}` on open issues labeled `{{LABEL}}` with no active assignment and no entry in **Done**. Add them to **In progress** after admission.
+
+Record an unresolved launch in **Need attention** with the issue, worker, pane ID if known, admission state, and reason. Use `query` and `capacity` to verify the launch state.
+
+- For `admission: not_attempted`, report a retained launch pane in the operator conversation before ending the current turn. Pane preparation can recover a verified thread but defers unused-pane closure with `turn_guard_unavailable`. Ask the operator to inspect the exact pane in Herdr and close it there when they confirm it is unused and no operator turn needs it. Leave a zoom-locked pane or a pane with unknown lock in the operator's control. Cron can keep returning `capacity_held` without starting another manager turn. Retry only after the workspace confirms the retained pane is gone and the worker passes capacity, quota, and directory checks.
+- For `outcome_unknown` or `admission: unknown`, keep the original assignment active and hold replay even if the pane disappears or there is a free slot. If `query` shows `managed_turn_identity_unavailable`, report the pane and ask the operator to inspect any approval in the Codex TUI. Keep the pane and checkout available for reconciliation. Resume reporting only when the original binding verifies the managed turn ID. Automatic delivery still requires the pane to be unlocked.
 
 ## Merging conditions
 
