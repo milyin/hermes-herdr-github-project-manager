@@ -75,4 +75,4 @@ Zoom-locked panes have effective state `working`. Unlocked panes distinguish an 
 | Command | Result and behavior |
 | --- | --- |
 | `/project-manager prepare-panes` | Run the workspace and pane verification, creation and recovery operations shared with cron. Return the workspace, verified panes and holds, including unused launch panes that need operator action. |
-| `/project-manager tick` | Run one complete [cron tick](WORKFLOW.md#cron-tick) in the same order and under the same lock as the scheduled run. Return the action taken or the reason it stopped, including the pane and turn IDs and any attention ID for a submitted report. |
+| `/project-manager tick` | Run one complete [cron tick](WORKFLOW.md#cron-tick) in the same order and under the same lock as the scheduled run. Return the action taken or the reason it stopped. Holds for discovery capacity and gateway submission outcomes include the `event` type and a `capacity` observation with `maximum`, `available`, and `occupied_states` keyed by pane ID. Submitted reports include the pane and turn IDs and any attention ID. |

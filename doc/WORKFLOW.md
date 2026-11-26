@@ -97,14 +97,16 @@ Run one no-agent watchdog job per enabled profile. Each tick reads the profile a
 2. Use the worker portion of `prepare-panes` to retry eligible deferred closes, return holds for unused launch panes that need operator recovery, verify worker completions and escalations through the agent manager, and update pane statuses.
 3. Use `quota`. If the quota gate holds, end this tick.
 4. Use the pane query to select the oldest unread worker report, either a finished result or an escalation. Submit it through the gateway and end this tick.
-5. If there is no unread worker report, use `capacity` to verify that at least one configured worker is ready to start a run. End this tick if none qualifies.
-6. Submit a `periodic` event through the gateway with the configured manager prompt so the workflow can discover work, then end this tick.
+5. If there is no eligible unread worker report, refresh the manager state and use `capacity` to verify that at least one configured worker is ready to start a run. End this tick if none qualifies.
+6. Refresh occupied worker slots after the readiness probes. If a slot is still available, submit a `periodic` event through the gateway with the configured manager prompt so the workflow can discover work. Otherwise return `capacity_held`.
 
 Worker reports take priority over the capacity check. A quota hold delays both worker reports and discovery turns. Serialize watchdog selection and submission with pane mutations for the same profile. While the manager has active or pending input, skip worker-report reads and submissions on subsequent ticks. Release the lock after the submission attempt so the manager can call engine tools during the turn.
 
 A worker is ready to start when a slot is available, no unresolved launch conflicts with it, the agent manager verifies its backend, model and launch profile prerequisites, and its quota allows submission. This preflight uses script only. Validate the selected working directory and recheck capacity and quota at submission.
 
 Immediately before submitting to the bound conversation, recheck the TUI attachment, zoom lock, and gateway state. End the tick if the pane is locked or the conversation has active or pending input. If operator input or zoom changes after the check, one watchdog message can still land in the conversation. If the submission reply is lost, end the tick. On the next tick, check the gateway state again before selecting work.
+
+The tick output records the selected event type and its capacity observation when it holds discovery for capacity or attempts a gateway submission. The observation includes the slot limit, available slots, and effective state of each occupied pane. Herdr and Hermes are separate services, so worker state can change after the observation. A submitted `worker_result` or `worker_attention` can legitimately show zero available slots.
 
 If Hermes reports an `unknown` watchdog admission at the head of the manager queue, resolve it through the gateway before selecting work. Leave unknown operator admissions for the operator. Worker delivery still follows the pane's acknowledgement state.
 
