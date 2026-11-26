@@ -46,23 +46,15 @@ class BundledWorkflows(unittest.TestCase):
             {'github_identity': APP, 'REPO': REPO, 'TASK': 'Implement the issue'})
         reviewer, _ = settings.workers['reviewer'].prompt.render(
             {'github_identity': APP, 'REPO': REPO, 'ISSUE': '6', 'PR': '7', 'HEAD': 'a' * 40})
-        for prompt in (manager, implementer, reviewer):
+        for prompt in (implementer, reviewer):
             for action in ('status', 'gh', 'git'):
                 self.assertIn(f'{APP} --repo {REPO} {action}', prompt)
             self.assertIn(f'{APP}[bot]', prompt)
             self.assertIn('Do not use personal accounts', prompt)
-        self.assertIn(f'Pass `github_identity` as `{APP}` to both workers', manager)
-        self.assertIn('`permissions.contents` is `write`', manager)
-
-    def test_github_example_requires_a_fresh_approval_check_before_pinned_merge(self):
-        self.github['manager']['parameters'].update(REPO=REPO, github_identity=APP)
-        manager, _ = Settings.read(self.home, self.github).manager.prompt.render()
-        procedure = manager.split('## Merge procedure\n', 1)[1].split('## Worker result\n', 1)[0]
-        merge = procedure.index(f'{APP} --repo {REPO} gh api --method PUT')
-        self.assertLess(procedure.index('Immediately before a merge, call `project_manager_github_handoff`'), merge)
-        self.assertLess(procedure.index('Require **Ready to merge** for that exact SHA in the current turn'), merge)
-        self.assertLess(procedure.index('**Awaiting human approval** under **Need attention**'), merge)
-        self.assertIn('--raw-field "sha=${reviewed_head}"', procedure[merge:])
+        self.assertIn(REPO, manager)
+        self.assertIn('project_manager_github_pull', manager)
+        self.assertIn('project_manager_wiki_update', manager)
+        self.assertNotIn(f'{APP} --repo', manager)
 
     def test_demo_example_renders_without_github_configuration(self):
         settings = Settings.read(self.home, self.demo)

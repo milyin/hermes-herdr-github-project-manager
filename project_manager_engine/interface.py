@@ -2,26 +2,53 @@
 import argparse
 import json
 import shlex
+import subprocess
 
 from .engine import COMMANDS, Engine
+from .github_app import GitHubApp
 from .github_handoff import github_handoff
+from .github_wiki import wiki_dashboard
 from .hermes_native import Native
+from .manager_policy import GITHUB_OPERATIONS
 from .settings import Hold, Settings, raw_settings
 
 
 def outcome(home, command, args):
     try:
-        if command == 'github_handoff':
+        if command in GITHUB_OPERATIONS:
             raw = raw_settings(home)
             if raw.get('enabled') is not True:
                 raise Hold('disabled', 'Enable project management in the selected Hermes profile')
-            manager = Settings.read(home, raw).manager
-            return {'ok': True, 'result': github_handoff(manager.prompt.defaults, **args)}
+            settings = Settings.read(home, raw)
+            if not settings.github_workflow:
+                raise Hold('invalid_config', 'This operation requires the GitHub workflow')
+            return {'ok': True, 'result': github_operation(settings.manager.prompt.defaults, command, args)}
         return {'ok': True, 'result': Engine(home, Native(home)).execute(command, **args)}
     except Hold as exc:
         return {'ok': False, 'error': exc.as_dict()}
     except (TypeError, OSError):
         return {'ok': False, 'error': dict(code='local_error', message='Operation could not be verified')}
+
+
+def github_operation(parameters, operation, args):
+    try:
+        if operation == 'github_handoff':
+            return github_handoff(parameters, **args)
+        app = GitHubApp(parameters)
+        if operation == 'github_pull' and args.keys() == {'pr'}:
+            app.verify()
+            return app.pull(args['pr'], discussion=True)
+        if operation == 'github_issues' and not args:
+            app.verify()
+            return app.issues(parameters.get('LABEL'))
+        page = parameters.get('wiki_page', 'Project-Manager.md')
+        if operation == 'wiki_read' and not args:
+            return wiki_dashboard(app, page)
+        if operation == 'wiki_update' and args.keys() == {'revision', 'markdown'} and args['markdown'] is not None:
+            return wiki_dashboard(app, page, **args)
+        raise Hold('invalid_arguments', 'Unexpected arguments to a scoped GitHub operation')
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        raise Hold('github_unverified', 'The scoped GitHub operation could not be verified') from exc
 
 
 def bulk_properties(names):
@@ -51,10 +78,19 @@ TOOLS = {
     'panes': ('Inspect live manager and worker panes, optionally filtering the results.', (), FILTERS),
     'capacity': ('Check available worker slots and launch readiness.', (), {}),
     'quota': ('Inspect quota observations and holds for configured worker accounts.', (), bulk_properties('worker')),
-    'github_handoff': ('Read GitHub approval and merge readiness for a PR and its clean worker-reviewed head.',
+    'github_handoff': ('Read the GitHub wiki handoff status for a PR and its clean worker-reviewed head. '
+                       'All merge actions belong to a human.',
                        ('pr', 'reviewed_head'), {'pr': {'type': 'integer', 'minimum': 1},
                                                  **bulk_properties('reviewed_head')}),
+    'github_issues': ('List open issues with the configured opt-in label.', (), {}),
+    'github_pull': ('Read a pull request and its discussion in the configured repository.',
+                    ('pr',), {'pr': {'type': 'integer', 'minimum': 1}}),
+    'wiki_read': ('Read the configured wiki dashboard and its current revision.', (), {}),
+    'wiki_update': ('Replace the configured wiki dashboard page at the revision read by wiki_read.',
+                    ('revision', 'markdown'), bulk_properties('revision markdown')),
 }
+
+
 class Parser(argparse.ArgumentParser):
     def error(self, message):
         raise Hold('invalid_arguments', message)

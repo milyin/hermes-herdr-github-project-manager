@@ -57,7 +57,7 @@ class GitHubHandoff(unittest.TestCase):
             self.reviews: [[]],
             self.permission: dict(permission='write', user=HUMAN),
         }
-        mock = patch('project_manager_engine.github_handoff.subprocess.run', side_effect=self.respond)
+        mock = patch('project_manager_engine.github_app.subprocess.run', side_effect=self.respond)
         self.run = mock.start()
         self.addCleanup(mock.stop)
 
@@ -110,6 +110,22 @@ class GitHubHandoff(unittest.TestCase):
         result = self.expect(AWAITING_APPROVAL, [self.status, self.pull, self.reviews])
         self.assertEqual(result['reason'], 'Could not verify GitHub review evidence')
 
+    def test_dismissal_during_eligibility_lookup_blocks_handoff_on_unprotected_pr(self):
+        self.replies[self.reviews] = [[review(1)]]
+
+        def dismiss_during_lookup(command, **kwargs):
+            reply = self.respond(command, **kwargs)
+            if tuple(command[3:]) == self.permission:
+                self.replies[self.reviews] = [[review(1, state='DISMISSED')]]
+            return reply
+
+        self.run.side_effect = dismiss_during_lookup
+        result = self.expect(AWAITING_APPROVAL, [self.status, self.pull, self.reviews, self.permission,
+                                                 self.pull, self.reviews])
+        self.assertEqual(result['head'], HEAD)
+        self.assertNotIn('approver', result)
+        self.assertEqual((self.pr['mergeStateStatus'], self.pr['reviewDecision']), ('CLEAN', ''))
+
     def test_review_lookup_failure_and_unverifiable_evidence_keep_approval_pending(self):
         for failure in (subprocess.CalledProcessError(1, self.reviews), 'invalid json',
                         [[review(1)], {}], [[review(1)], [review(1, state='DISMISSED')]],
@@ -128,10 +144,10 @@ class GitHubHandoff(unittest.TestCase):
                 self.replies[self.permission] = permission
                 self.expect(AWAITING_APPROVAL, [self.status, self.pull, self.reviews, self.permission])
 
-    def test_exact_head_human_approval_marks_the_current_head_ready_to_merge(self):
+    def test_exact_head_human_approval_can_only_handoff_to_human(self):
         self.replies[self.reviews] = [[review(1, head=OLD_HEAD)], [review(2), review(3, state='COMMENTED')]]
-        result = self.expect('Ready to merge',
-                             [self.status, self.pull, self.reviews, self.permission, self.pull])
+        result = self.expect('Awaiting human merge',
+                             [self.status, self.pull, self.reviews, self.permission, self.pull, self.reviews])
         self.assertEqual((result['head'], result['approver']), (HEAD, 'reviewer'))
 
     def test_approved_pr_still_needs_github_rules_and_checks(self):
@@ -142,7 +158,7 @@ class GitHubHandoff(unittest.TestCase):
                 self.run.reset_mock()
                 self.pr.update(mergeStateStatus=merge_status, reviewDecision=decision)
                 self.expect('Awaiting GitHub requirements',
-                            [self.status, self.pull, self.reviews, self.permission, self.pull])
+                            [self.status, self.pull, self.reviews, self.permission, self.pull, self.reviews])
 
     def test_head_change_during_approval_lookup_invalidates_handoff(self):
         self.replies[self.reviews] = [[review(1)]]

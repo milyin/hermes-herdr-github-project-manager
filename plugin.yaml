@@ -4,6 +4,7 @@ description: Hermes commands and tools for a Herdr project manager
 provides_hooks:
   - on_session_open
   - on_session_start
+  - pre_tool_call
 provides_tools:
   - project_manager_run
   - project_manager_steer
@@ -15,3 +16,8 @@ provides_tools:
   - project_manager_panes
   - project_manager_capacity
   - project_manager_quota
+  - project_manager_github_handoff
+  - project_manager_github_issues
+  - project_manager_github_pull
+  - project_manager_wiki_read
+  - project_manager_wiki_update
