@@ -17,7 +17,7 @@ The manager tracks opted-in issues, delegates implementation and review, and pub
    }
    ```
 
-4. Run the [installer](install_proxy.py) to create a command named for the configured App slug. Put it in a trusted directory on the manager and both workers' `PATH`. The proxy uses the absolute JSON path passed to the installer, regardless of the process's `XDG_CONFIG_HOME`. Keep the workflow directory intact and make Python 3.10+, OpenSSL, Git, and GitHub CLI available where the proxy runs.
+4. Run the [installer](install_proxy.py) to create a command named for the configured App slug. Put it in an operator-approved trusted directory on the manager and both workers' `PATH`. The proxy uses the absolute JSON path passed to the installer. Its configuration selection is independent of `HOME`, `XDG_CONFIG_HOME`, `HERMES_HOME`, and the checkout. Keep the workflow directory intact and make Python 3.10+, OpenSSL, Git, and GitHub CLI available where the proxy runs.
 
    ```sh
    python3 -B /absolute/path/to/skill/workflows/github/install_proxy.py \
@@ -31,7 +31,33 @@ The manager tracks opted-in issues, delegates implementation and review, and pub
    python3 -B /absolute/path/to/skill/workflows/github/ensure_github_label.py -- OWNER/REPO APP_SLUG 'hermes:projectmanager'
    ```
 
-7. Fill in the [profile settings](#profile-settings), save the operator-confirmed profile, and run `/project-manager`. With the operator, verify the workflow on an opted-in issue.
+7. Fill in the [profile settings](#profile-settings), save the operator-confirmed profile, and run `/project-manager`. With the operator, [verify App access](#verify-app-access-in-each-role) before using the workflow on an opted-in issue.
+
+## Verify App access in each role
+
+Run the following in the manager's execution environment and in the actual implementer and reviewer execution environments, including their configured launch profiles and sandboxes. Use each worker's intended checkout. Replace `APP_SLUG` and `OWNER/REPO` with the values confirmed in setup.
+
+```sh
+command -v APP_SLUG
+APP_SLUG --repo OWNER/REPO status
+```
+
+Confirm that the command resolves to the approved launcher and that status reports `authenticated: true`, the expected `APP_SLUG[bot]` actor, the exact repository, and the permissions needed by that role. A manager-side success verifies only the manager's environment. Once status succeeds, verify that the launcher can invoke Git and GitHub CLI with these read-only checks. Run the Git check from the intended checkout and compare its SHA with the assigned head when reviewing a PR.
+
+```sh
+APP_SLUG --repo OWNER/REPO git rev-parse HEAD
+APP_SLUG --repo OWNER/REPO gh api "repos/OWNER/REPO" --jq .full_name
+```
+
+For reviewer setup, also check that the reviewer can read an open PR's remote head and CI results. Use the numeric PR number in place of `PR_NUMBER`.
+
+```sh
+APP_SLUG --repo OWNER/REPO gh pr view PR_NUMBER --json headRefOid,statusCheckRollup
+```
+
+If a check fails, report the role, scoped action, and error to the operator. A same-named legacy launcher can still be selected by the role's `PATH`. When it reports `Path requires trusted parent directories`, ask the operator to verify the launcher's configuration and path trust requirements in that role's environment. Keep the ownership and parent-directory checks in force.
+
+For a profile configured to use the bundled proxy, the operator can use the installation and migration steps here to make the approved proxy available to each role. The sandbox must allow access to the trusted launcher, its dependencies, and the original private files. When a profile requires a different launcher's managed provisioning, use only the supported repository and role setup for that launcher. Keep the affected role blocked until its own checks pass.
 
 ## Using the launcher
 
@@ -126,7 +152,7 @@ If the existing App JSON uses the legacy fields below, create a separate JSON fi
 
 Reuse the existing key in place. Put only its path in `private_key`, and keep the key file private and owned by the running user. If the old value starts with `~/`, expand it using the original user's home directory. Resolve a relative path from the working directory the legacy launcher used, and use the path to the regular key file if the old path is a symlink.
 
-Pass the new JSON's absolute path to `install_proxy.py --config` as shown in step 4. A JSON file that already uses the proxy fields can be passed directly. If the destination already contains a command with the same App slug, use a trusted directory earlier on the workflow's `PATH` and ensure the manager and workers resolve the new proxy.
+Pass the new JSON's absolute path to `install_proxy.py --config` as shown in step 4. A JSON file that already uses the proxy fields can be passed directly. If the destination already contains a command with the same App slug, choose a separate trusted directory. In profiles approved to use the bundled proxy, have the operator put that directory earlier on the workflow's `PATH` and [verify the selected launcher in each role](#verify-app-access-in-each-role).
 
 If any of the three `prompt_file` values still use `doc/`, replace only those values. These examples are relative to the profile directory. For absolute paths, keep the checkout prefix and replace the part after it.
 

@@ -98,12 +98,18 @@ class AppLauncher(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertEqual(result.stdout, '')
 
-    def test_proxy_uses_the_same_private_configuration_in_different_xdg_environments(self):
+    def test_proxy_uses_the_same_private_configuration_in_all_role_environments(self):
         proxy = install_proxy(self.path, self.home / 'bin')
-        for role in ('manager', 'worker'):
+        for role in ('manager', 'implementer', 'reviewer'):
             with self.subTest(role=role):
                 output, errors = StringIO(), StringIO()
-                with (patch.dict(os.environ, {'XDG_CONFIG_HOME': str(self.home / role)}),
+                role_home = self.home / role
+                environment = {
+                    'HOME': str(role_home),
+                    'XDG_CONFIG_HOME': str(role_home / 'config'),
+                    'HERMES_HOME': str(role_home / 'profile'),
+                }
+                with (patch.dict(os.environ, environment),
                       patch.dict(sys.modules, {'github_app': github_app}),
                       patch.object(sys, 'path', sys.path.copy()),
                       patch.object(sys, 'argv', [str(proxy), '--repo', REPO, 'status']),
