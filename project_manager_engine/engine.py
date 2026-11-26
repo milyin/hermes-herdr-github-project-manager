@@ -344,19 +344,24 @@ class Engine:
         return dict(accounts=reports, hold=any(report['hold'] for report in reports),
                     applicable=bool(groups))
 
-    def occupied(self, rows):
-        return [row['pane_id'] for row in rows if row['state'] in OCCUPIED]
+    def worker_slots(self, rows):
+        occupied_states = {row['pane_id']: row['state'] for row in rows if row['state'] in OCCUPIED}
+        return dict(maximum=self.settings.limit, available=max(0, self.settings.limit - len(occupied_states)),
+                    occupied_states=occupied_states)
+
+    def worker_rows(self, layout):
+        return [row for raw in layout if raw.get('status') not in ('MGR', 'QUOTA')
+                and (row := self.row(raw)) and row['role'] == 'worker']
 
     def capacity(self):
         layout = self.layout()
-        rows = [row for raw in layout if (row := self.row(raw)) and row['role'] == 'worker']
-        occupied = self.occupied(rows)
-        available = max(0, self.settings.limit - len(occupied))
+        rows = self.worker_rows(layout)
+        slots = self.worker_slots(rows)
         quota = self.quota()
         held = {name: account['hold'] for account in quota['accounts'] for name in account['workers']}
         ready = {}
         for setting in self.settings.workers.values():
-            reason = 'capacity' if not available else held.get(setting.name)
+            reason = 'capacity' if not slots['available'] else held.get(setting.name)
             if not reason:
                 try:
                     self.check_directory(setting.cwd, rows)
@@ -377,8 +382,7 @@ class Engine:
                 unresolved.append(dict(
                     {key: record[key] for key in ('instance', 'workspace_id', 'pane_id', 'terminal_id', 'worker', 'thread_id')},
                     admission='unknown', presence=presence))
-        return dict(maximum=self.settings.limit, occupied=occupied, available=available, workers=ready,
-                    unresolved_launches=unresolved)
+        return dict(slots, occupied=list(slots['occupied_states']), workers=ready, unresolved_launches=unresolved)
 
     def worker_pane(self, pane_id):
         for raw in self.layout():
@@ -408,7 +412,7 @@ class Engine:
 
     def check_admission(self, setting, *, rows=None):
         rows = self.panes(role='worker')['panes'] if rows is None else rows
-        if len(self.occupied(rows)) >= self.settings.limit:
+        if not self.worker_slots(rows)['available']:
             raise Hold('capacity', 'No working pane slots are available')
         quota = self.quota(setting.name)
         if quota['hold']:
@@ -718,12 +722,9 @@ class Engine:
                 event.update(type='worker_result', message=message[:EXCERPT_LIMIT])
                 if len(message) > EXCERPT_LIMIT:
                     event['truncated'] = True
-        else:
-            capacity = self.capacity()
-            if not any(worker['ready'] for worker in capacity['workers'].values()):
-                return dict(action='capacity_held', holds=holds, unresolved_launches=capacity['unresolved_launches'])
-        refreshed = self.panes(role='manager', pane_id=manager['pane_id'])['panes']
-        if len(refreshed) != 1 or not self.manager_idle(refreshed[0]):
+        refreshed = self.panes()['panes']
+        managers = [row for row in refreshed if row['role'] == 'manager' and row['pane_id'] == manager['pane_id']]
+        if len(managers) != 1 or not self.manager_idle(managers[0]):
             return {'action': 'manager_held'}
         if report:
             current = self.tracked(report['pane_id'])
@@ -735,11 +736,24 @@ class Engine:
         workers = {worker.name: worker.description for worker in self.settings.workers.values()}
         payload = (manager_prompt + '\n\nConfigured workers: ' + json.dumps(workers, ensure_ascii=False)
                    + '\n\nWatchdog event (data):\n' + json.dumps(event, ensure_ascii=False))
+        if report:
+            slots = self.worker_slots(row for row in refreshed if row['role'] == 'worker')
+        else:
+            capacity = self.capacity()
+            ready = any(worker['ready'] for worker in capacity['workers'].values())
+            # Quota and preflight probes can outlive the worker observations used by capacity().
+            slots = (self.worker_slots(self.worker_rows(self.layout())) if ready else
+                     {key: capacity[key] for key in ('maximum', 'available', 'occupied_states')})
+            if not ready or not slots['available']:
+                return dict(action='capacity_held', holds=holds, unresolved_launches=capacity['unresolved_launches'],
+                            event=event['type'], capacity=slots)
+        diagnostics = dict(event=event['type'], capacity=slots)
         try:
-            receipt = self.native.submit(refreshed[0], payload)
+            receipt = self.native.submit(managers[0], payload)
         except Hold as exc:
             if exc.code in ('manager_busy', 'manager_locked', 'manager_detached', 'manager_suspended'):
-                return {'action': 'manager_held', 'reason': exc.code}
+                return dict(action='manager_held', reason=exc.code, **diagnostics)
+            exc.details.update(diagnostics)
             raise
-        return dict(action='submitted', event=event['type'], admission_id=receipt.get('admission_id'),
+        return dict(action='submitted', admission_id=receipt.get('admission_id'), **diagnostics,
                     **{key: event[key] for key in ('pane_id', 'turn_id', 'attention_id') if key in event})

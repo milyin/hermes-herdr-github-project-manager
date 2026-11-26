@@ -171,6 +171,64 @@ class Contract(unittest.TestCase):
         self.assertEqual(self.engine.execute('query', pane_id='w1:p2')['delivery'], 'read')
         self.assertEqual(self.engine.execute('capacity')['occupied'], [])
 
+    def test_periodic_is_held_with_a_verified_busy_worker_at_limit_one(self):
+        self.native.rows.append(self.native.worker)
+        self.native.result.update(state='working', active=True)
+        row, = self.engine.execute('panes', role='worker')['panes']
+        self.assertEqual((row['state'], row['admission'], row['delivery']), ('working', 'accepted', 'none'))
+
+        tick = self.engine.execute('tick')
+
+        self.assertEqual((tick['action'], tick['event']), ('capacity_held', 'periodic'))
+        self.assertEqual(tick['capacity'], dict(maximum=1, available=0, occupied_states={'w1:p2': 'working'}))
+        self.assertEqual(self.native.submissions, [])
+
+    def test_periodic_rechecks_slots_when_a_worker_becomes_busy_during_preflight(self):
+        self.native.worker['status'] = 'I:READ'
+        self.native.rows.append(self.native.worker)
+        self.native.result['working_directory'] = str(self.home)
+        self.assertTrue(self.engine.execute('capacity')['workers']['worker']['ready'])
+
+        def start_turn(*_):
+            self.native.result.update(state='working', turn_id='next-turn', active=True)
+            return {'ready': True}
+
+        with patch.object(self.native, 'preflight', side_effect=start_turn) as preflight:
+            tick = self.engine.execute('tick')
+
+        preflight.assert_called_once()
+        self.assertEqual((tick['action'], tick['event']), ('capacity_held', 'periodic'))
+        self.assertEqual(tick['capacity'], dict(maximum=1, available=0, occupied_states={'w1:p2': 'working'}))
+        self.assertEqual(self.native.submissions, [])
+
+    def test_periodic_submits_with_available_capacity(self):
+        tick = self.engine.execute('tick')
+
+        self.assertEqual(tick, dict(action='submitted', event='periodic', admission_id='accepted-1',
+                                    capacity=dict(maximum=1, available=1, occupied_states={})))
+        self.assertEqual(self.native.submissions, [{'type': 'periodic'}])
+
+    def test_result_is_delivered_while_another_worker_fills_capacity(self):
+        busy = dict(self.native.worker, pane_id='w1:p3', terminal_id='t3')
+        self.native.rows.extend([self.native.worker, busy])
+        agent = self.native.agent
+
+        def read_agent(operation, workspace, pane, *args, **kwargs):
+            if pane == busy['pane_id']:
+                self.assertEqual(operation, 'status')
+                return dict(self.native.result, state='working', active=True,
+                            thread_id='busy-thread', turn_id='busy-turn', working_directory=str(self.home))
+            return agent(operation, workspace, pane, *args, **kwargs)
+
+        with patch.object(self.native, 'agent', side_effect=read_agent):
+            tick = self.engine.execute('tick')
+
+        self.assertEqual(tick, dict(action='submitted', event='worker_result', admission_id='accepted-1',
+                                    pane_id='w1:p2', turn_id='turn',
+                                    capacity=dict(maximum=1, available=0, occupied_states={'w1:p3': 'working'})))
+        self.assertEqual(self.native.submissions, [dict(type='worker_result', worker='worker',
+                                                        pane_id='w1:p2', turn_id='turn', message='finished')])
+
     def test_zoom_and_acknowledged_attention_use_a_slot(self):
         self.native.worker['user_locked'] = True
         self.native.rows.append(self.native.worker)
@@ -180,7 +238,10 @@ class Contract(unittest.TestCase):
             attention_id='ask', state='blocked', reason='operator approval', observed_at='2026-11-26T07:00:00Z'))
         event = self.engine.execute('tick')
         self.assertEqual(event['event'], 'worker_attention')
+        self.assertEqual(event['action'], 'submitted')
         self.assertEqual(event['attention_id'], 'ask')
+        self.assertEqual(event['capacity'], dict(maximum=1, available=0, occupied_states={'w1:p2': 'blocked'}))
+        self.assertEqual([submission['type'] for submission in self.native.submissions], ['worker_attention'])
         self.engine.execute('mark_read', pane_id='w1:p2', turn_id='turn', attention_id='ask')
         self.assertEqual(self.engine.execute('capacity')['occupied'], ['w1:p2'])
         self.assertEqual(self.engine.execute('tick')['action'], 'capacity_held')
