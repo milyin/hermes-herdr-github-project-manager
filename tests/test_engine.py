@@ -4,6 +4,7 @@ from pathlib import Path
 from subprocess import CompletedProcess, PIPE, Popen, TimeoutExpired, run
 import sys
 from tempfile import TemporaryDirectory
+from typing import cast
 import unittest
 from unittest.mock import patch
 
@@ -518,7 +519,7 @@ worker.join()
         launcher.parent.mkdir()
         launcher.touch(mode=0o700)
         wrapper = {'profile_executable': launcher.name}
-        worker: dict = self.config['workers'][0]
+        worker = cast(list[dict[str, object]], self.config['workers'])[0]
         worker.update(prompt_file=str(GITHUB_WORKFLOW / 'REVIEWER_PROMPT.md'),
                       parameters=dict(REPO=None, ISSUE=None, PR=None, HEAD=None, github_identity=wrapper))
         self.save()
