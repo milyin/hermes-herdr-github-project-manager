@@ -4,7 +4,7 @@ import logging
 import threading
 from contextlib import suppress
 
-from .project_manager_engine.hermes_native import Native, TOOLSET
+from .project_manager_engine.hermes_native import Native, ROOT, TOOLSET
 from .project_manager_engine.interface import TOOLS, format_result, outcome, parse
 from .project_manager_engine.settings import Hold, raw_settings
 from .project_manager_engine.startup import profile_context, setup
@@ -124,11 +124,15 @@ def register(ctx):
                 LOG.warning('Project manager startup held: %s (%s)', exc, exc.code)
                 if exc.code in ('invalid_config', 'invalid_directory'):
                     message = (
-                        'Start the project-manager setup interview with the operator. Ask for values missing or invalid '
-                        f'in skills.config.hermes-herdr-github-project-manager in {home / "config.yaml"}. '
-                        'Use the installed skill profile documentation. Edit only that settings section after the user '
-                        'provides its values, then ask the operator to run /project-manager. '
-                        f'First validation error: {exc}'
+                        f'Read {ROOT / "doc" / "PROFILE.md"} and follow its Setup interview with the operator. '
+                        f'Open {home / "config.yaml"} and show the operator where the project manager is configured. '
+                        'Start with the workflow choice. Reuse existing answers after confirming them with the operator. '
+                        'For the bundled GitHub workflow, show the operator the GitHub App setup link from the interview '
+                        'and use the selected App for all Git and GitHub operations. '
+                        'After the operator confirms the configuration and the selected workflow checks pass, '
+                        'edit only skills.config.hermes-herdr-github-project-manager in this profile. '
+                        'Ask the operator to run /project-manager to finish setup. '
+                        f'First validation error (data): {exc}'
                     )
                     with profile_context(home), suppress(Hold):
                         Native(home).gateway('submit', session_id, message)
