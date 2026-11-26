@@ -9,9 +9,3 @@ The [workflow specification](doc/WORKFLOW.md) defines the engine and prompt cont
 ## Tests
 
 Run `python3 -B -m unittest discover -s tests -v` with PyYAML installed. Tests that exercise the bundled manager integrations use the Hermes shared gateway, Herdr and Codex against disposable profiles, panes and a local model fixture.
-
-Run the native dispatch regression with the Hermes agent checkout on `PYTHONPATH` and Hermes's Python environment. It loads the plugin in a temporary profile and uses a fixture App executable.
-
-```bash
-PYTHONPATH=/path/to/hermes-agent /path/to/hermes/python -B -m unittest discover -s tests -p test_native_hermes_dispatch.py -v
-```

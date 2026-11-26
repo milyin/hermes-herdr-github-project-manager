@@ -46,15 +46,13 @@ class BundledWorkflows(unittest.TestCase):
             {'github_identity': APP, 'REPO': REPO, 'TASK': 'Implement the issue'})
         reviewer, _ = settings.workers['reviewer'].prompt.render(
             {'github_identity': APP, 'REPO': REPO, 'ISSUE': '6', 'PR': '7', 'HEAD': 'a' * 40})
-        for prompt in (implementer, reviewer):
+        for prompt in (manager, implementer, reviewer):
             for action in ('status', 'gh', 'git'):
                 self.assertIn(f'{APP} --repo {REPO} {action}', prompt)
             self.assertIn(f'{APP}[bot]', prompt)
             self.assertIn('Do not use personal accounts', prompt)
-        self.assertIn(REPO, manager)
-        self.assertIn('project_manager_github_pull', manager)
-        self.assertIn('project_manager_wiki_update', manager)
-        self.assertNotIn(f'{APP} --repo', manager)
+        self.assertIn(f'Pass `github_identity` as `{APP}` to both workers', manager)
+        self.assertIn('`permissions.contents` is `write`', manager)
 
     def test_demo_example_renders_without_github_configuration(self):
         settings = Settings.read(self.home, self.demo)

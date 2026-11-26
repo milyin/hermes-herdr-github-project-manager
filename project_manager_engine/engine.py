@@ -446,7 +446,7 @@ class Engine:
         if not self.manager_idle(manager):
             return {'action': 'manager_held', 'manager': manager}
         self.prepare_workers()
-        if not self.settings.github_workflow and self.quota()['hold']:
+        if self.quota()['hold']:
             return {'action': 'quota_held'}
         unread = self.panes(role='worker', delivery='unread', lock='unlocked')['panes']
         report = next((row for row in unread if not row['pending_closure']), None)
@@ -463,7 +463,7 @@ class Engine:
                 event.update(type='worker_result', message=message[:EXCERPT_LIMIT])
                 if len(message) > EXCERPT_LIMIT:
                     event['truncated'] = True
-        elif not self.settings.github_workflow and not any(worker['ready'] for worker in self.capacity()['workers'].values()):
+        elif not any(worker['ready'] for worker in self.capacity()['workers'].values()):
             return {'action': 'capacity_held'}
         refreshed = self.panes(role='manager', pane_id=manager['pane_id'])['panes']
         if len(refreshed) != 1 or not self.manager_idle(refreshed[0]):

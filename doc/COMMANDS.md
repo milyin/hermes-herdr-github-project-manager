@@ -18,17 +18,8 @@ Hermes gives the bound manager gateway session these registered tools and their 
 | `project_manager_panes` | Optional `role`, `worker`, `pane_id`, `state`, `delivery`, `presence`, and `lock` filters. |
 | `project_manager_capacity` | None. |
 | `project_manager_quota` | Optional `worker`. |
-| `project_manager_github_handoff` | `pr` number and `reviewed_head` full SHA. Uses the manager's configured GitHub repository, App and human reviewer list. |
-| `project_manager_github_issues` | None. Uses the configured repository and opt-in label. |
-| `project_manager_github_pull` | `pr`, a positive PR number in the configured repository. |
-| `project_manager_wiki_read` | None. Returns the configured dashboard's Markdown and the wiki revision. |
-| `project_manager_wiki_update` | `revision` from a wiki read and replacement `markdown` for the configured dashboard page. |
 
 Pane preparation and `tick` are available through the operator commands and cron. The manager uses the tools above within its turn.
-
-The scoped GitHub manager receives GitHub, wiki and pane tracking tools. Use the operator commands to start and steer its workers. The demo can use the model's delegation tools through the `project_manager_delegation` toolset.
-
-`/project-manager github-handoff PR REVIEWED_HEAD` reads the same GitHub evidence as the manager tool. It returns a wiki section and status for the manual handoff. [Human merge handoff](WORKFLOW.md#human-merge-handoff)
 
 ## Worker commands
 

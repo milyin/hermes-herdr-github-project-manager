@@ -136,13 +136,6 @@ class Contract(unittest.TestCase):
         self.assertEqual(self.engine.execute('query', pane_id='w1:p2')['delivery'], 'read')
         self.assertEqual(self.engine.execute('capacity')['occupied'], [])
 
-    def test_github_dashboard_refreshes_without_worker_quota(self):
-        self.config['manager']['parameters']['github_identity'] = 'example-app'
-        self.save()
-        self.native.quota_hold = True
-        self.assertEqual(self.engine.execute('tick')['event'], 'periodic')
-        self.assertEqual(self.native.submissions, [{'type': 'periodic'}])
-
     def test_zoom_and_acknowledged_attention_use_a_slot(self):
         self.native.worker['user_locked'] = True
         self.native.rows.append(self.native.worker)
