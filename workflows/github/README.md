@@ -48,6 +48,10 @@ Each invocation verifies the configured App and repository before dispatch. Use 
 
 GitHub's merge readiness and active branch rules are checked before the direct merge. The workflow also requires a clean worker verdict, cleared actionable feedback, and an active independent human approval for the exact head. The manager supplies the verdict and feedback decision from verified workflow records. The SHA pin guards against head changes. Review state can still change between the final read and the write. GitHub branch rules supply any server-side review enforcement. [Merge instructions](MANAGER_PROMPT.md#merging-conditions) · [GitHub merge endpoint](https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request)
 
+## Dashboard reconciliation
+
+The manager checks tracked issues and PRs directly, including work no longer in open intake. A closed issue whose linked PRs all closed without merging leaves the dashboard once no open replacement work, active or unresolved submission, or assigned pane remains. Uncertain lookups and pending cleanup retain tracking. **Done** records confirmed merges, not closed PRs. See [closed work reconciliation](MANAGER_PROMPT.md#closed-work-reconciliation).
+
 ## Worker handoffs
 
 The manager sends self-contained assignments in the worker's managed terminal. A review assignment carries the issue, PR, exact head, and implementation evidence. An implementation follow-up carries the references, reviewed head, actual findings, supporting details, and requested changes. Pane, turn and feedback IDs stay with the manager for tracking. The wiki records a short status and the identifiers needed to resume work. [Worker handoff boundary](../../doc/WORKFLOW.md#worker-handoff-boundary)
