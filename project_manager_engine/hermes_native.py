@@ -97,7 +97,7 @@ class Native:
         except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
             raise Hold('transport_error', 'Dependency returned no verified reply') from exc
         if reply.get('ok') is False:
-            if not isinstance(reply.get('error'), dict) or 'result' in reply:
+            if child.returncode != 1 or not isinstance(reply.get('error'), dict) or 'result' in reply:
                 raise Hold('invalid_response', 'Dependency returned an invalid error receipt')
             error = dict(reply['error'])
             code = error.pop('code', None)

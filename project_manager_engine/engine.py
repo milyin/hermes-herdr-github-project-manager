@@ -5,6 +5,7 @@ import json
 import os
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 from .settings import Hold, Settings, directory, raw_settings
@@ -15,9 +16,11 @@ WORKER_OPERATIONS = ('run', 'steer', 'query', 'mark_read', 'set_comment', 'close
 COMMANDS = (*WORKER_OPERATIONS, 'prepare_panes', 'tick')
 OCCUPIED = {'starting', 'working', 'blocked', 'suspended', 'unknown'}
 EXCERPT_LIMIT = 12000
+# The receiver reports deadline_elapsed before any prompt bytes are written.
+# Partial writes, reply deadlines and failures after admission use other codes.
 RUN_REFUSALS = {'user_locked', 'lock_unknown', 'worker_unavailable', 'turn_active', 'already_started',
                 'invalid_prompt', 'invalid_parameters', 'quota_account_changed', 'quota_unavailable',
-                'quota_behind_pace', 'quota_exhausted', 'receiver_unavailable'}
+                'quota_behind_pace', 'quota_exhausted', 'receiver_unavailable', 'codex_rejected', 'deadline_elapsed'}
 
 
 def private_runtime(home):
@@ -39,6 +42,10 @@ def profile_lock(home):
 
 def identifier(value):
     return isinstance(value, str) and bool(value.strip())
+
+
+def fingerprint(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
 def issued(reply, pane, thread=None):
@@ -102,18 +109,26 @@ class Engine:
                 if not isinstance(record, dict) or not all(identifier(record.get(key)) for key in (
                         'instance', 'workspace_id', 'pane_id', 'terminal_id', 'worker', 'thread_id')):
                     raise ValueError
+                if any(key in record and not identifier(record[key]) for key in ('turn_id', 'parameters_fingerprint')):
+                    raise ValueError
             except (OSError, ValueError) as exc:
                 raise Hold('invalid_launch_record', 'A pending worker admission record could not be verified') from exc
             launches[path] = record
         return launches
 
     def remember_launch(self, path, record):
-        with NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent) as stream:
-            json.dump(record, stream)
-            stream.flush()
-            os.fsync(stream.fileno())
-            # Keep the temporary file open while publishing the complete record.
-            os.link(stream.name, path)
+        temporary = NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent, delete=False)
+        try:
+            with temporary as stream:
+                json.dump(record, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            if path in self.launches:
+                os.replace(temporary.name, path)
+            else:
+                os.link(temporary.name, path)
+        finally:
+            Path(temporary.name).unlink(missing_ok=True)
         directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
             os.fsync(directory_fd)
@@ -223,15 +238,27 @@ class Engine:
         path = self.pane_launch(row['pane_id'])
         if path is not None:
             launch = self.launches[path]
+            turn = launch.get('turn_id')
             if any(row.get(key) != launch[key] for key in ('terminal_id', 'worker', 'thread_id')):
-                row.update(state='unknown', delivery='unknown', recoverable=False)
-                row.setdefault('reason', Hold('binding_unverified', 'The recorded submission binding cannot be verified').as_dict())
-            # A blocked or suspended status may identify an operator turn.
-            elif identifier(row.get('turn_id')) and row['state'] in ('working', 'done'):
-                row['admission'] = 'accepted'
-                return
-            row.update(admission='unknown', state='unknown', delivery='unknown')
-            row.setdefault('reason', Hold('outcome_unknown', 'The initial prompt admission is unverified').as_dict())
+                row['recoverable'] = False
+                reason = Hold('binding_unverified', 'The recorded submission binding cannot be verified')
+                row['reason'] = reason.as_dict()
+            else:
+                observed = row.get('turn_id')
+                if turn is None and identifier(observed) and self.has_managed_admission(launch, row):
+                    turn = observed
+                    self.record_launch_turn(path, turn)
+                if turn is not None and observed == turn and row['state'] in ('working', 'done', 'blocked', 'suspended'):
+                    row.update(admission='accepted', admitted_turn_id=turn)
+                    return
+                reason = (Hold('turn_unverified', 'The admitted turn is not verified in the current worker status') if turn else
+                          Hold('outcome_unknown', 'The initial prompt admission is unverified'))
+            row.update(admission='accepted' if turn else 'unknown', state='unknown', delivery='unknown')
+            if turn is not None:
+                row['admitted_turn_id'] = turn
+                row.pop('turn_id', None)
+            row.pop('attention', None)
+            row.setdefault('reason', reason.as_dict())
         elif mark == 'START':
             row['admission'] = 'not_attempted'
             if row['state'] in ('idle', 'unknown'):
@@ -245,6 +272,24 @@ class Engine:
             else:
                 row.update(admission='unknown', state='unknown', delivery='unknown')
                 row.setdefault('reason', Hold('outcome_unknown', 'The pane has no verified initial admission').as_dict())
+
+    def has_managed_admission(self, launch, row):
+        if row['state'] in ('working', 'done'):
+            # These states carry the receiver's tracked managed turn ID.
+            return True
+        if row['state'] not in ('blocked', 'suspended') or not launch.get('parameters_fingerprint'):
+            return False
+        # Attention status can carry an operator turn. Require matching run metadata
+        # from the result of the exact turn before adopting its attention.
+        try:
+            result = self.agent('result', row['pane_id'], '--turn-id', row['turn_id'])
+        except Hold:
+            return False
+        parameters = result.get('parameters')
+        return (result.get('thread_id') == launch['thread_id'] and result.get('turn_id') == row['turn_id']
+                and result.get('state') in ('working', 'blocked', 'suspended', 'done')
+                and isinstance(parameters, dict) and bool(parameters)
+                and fingerprint(parameters) == launch['parameters_fingerprint'])
 
     def panes(self, **filters):
         accepted = {'role', 'worker', 'pane_id', 'state', 'delivery', 'presence', 'lock'}
@@ -317,10 +362,14 @@ class Engine:
                       for row in rows if row.get('admission') in ('not_attempted', 'unknown')]
         visible = {raw['pane_id'] for raw in layout}
         for record in self.launches.values():
+            if 'turn_id' in record:
+                continue
             current_workspace = (record['instance'], record['workspace_id']) == (self.settings.instance, self.workspace_id)
             if not current_workspace or not any(row['pane_id'] == record['pane_id'] for row in rows):
                 presence = 'unknown' if not current_workspace else 'yes' if record['pane_id'] in visible else 'no'
-                unresolved.append(dict(record, admission='unknown', presence=presence))
+                unresolved.append(dict(
+                    {key: record[key] for key in ('instance', 'workspace_id', 'pane_id', 'terminal_id', 'worker', 'thread_id')},
+                    admission='unknown', presence=presence))
         return dict(maximum=self.settings.limit, occupied=occupied, available=available, workers=ready,
                     unresolved_launches=unresolved)
 
@@ -333,13 +382,17 @@ class Engine:
                 raise Hold('unknown_worker_pane', 'The exact worker binding could not be verified', pane_id=pane_id)
         path = self.pane_launch(pane_id)
         if path is not None:
+            if turn := self.launches[path].get('turn_id'):
+                raise Hold('pane_not_found', 'The pane for the admitted turn is absent from the bound workspace',
+                           pane_id=pane_id, presence='no', admission='accepted', turn_id=turn)
             raise Hold('outcome_unknown', 'The worker pane is absent and its submission is still unverified',
                        pane_id=pane_id, presence='no', admission='unknown')
         raise Hold('pane_not_found', 'The pane is absent from the bound workspace', pane_id=pane_id)
 
     def tracked(self, pane_id):
         row = self.worker_pane(pane_id)
-        if not identifier(row.get('thread_id')) or row.get('admission') in ('unknown', 'not_attempted'):
+        if (not identifier(row.get('thread_id')) or row.get('admission') in ('unknown', 'not_attempted')
+                or row.get('reason', {}).get('code') == 'binding_unverified'):
             raise Hold('unknown_worker_pane', 'The exact active worker binding could not be verified', pane_id=pane_id)
         return row
 
@@ -371,10 +424,14 @@ class Engine:
             raise Hold('invalid_prompt', 'Prompt must be text')
         cwd = setting.cwd if working_directory is None else directory(working_directory)
         body = dict(prompt=text + ('\n\n' + prompt if prompt else ''), parameters=values)
-        fingerprint = hashlib.sha256(json.dumps([name, body['prompt']]).encode()).hexdigest()
-        pending = private_runtime(self.home) / f'launch-{fingerprint}.json'
+        dispatch = fingerprint([name, body['prompt']])
+        pending = private_runtime(self.home) / f'launch-{dispatch}.json'
         if pending in self.launches:
             record = self.launches[pending]
+            if turn := record.get('turn_id'):
+                raise Hold('already_started', 'This initial prompt was already admitted', pane_id=record['pane_id'],
+                           workspace_id=record['workspace_id'], thread_id=record['thread_id'], turn_id=turn,
+                           admission='accepted')
             raise Hold('outcome_unknown', 'This initial prompt already has an unverified submission',
                        pane_id=record['pane_id'], workspace_id=record['workspace_id'], admission='unknown')
         self.native.preflight(setting, cwd)
@@ -405,7 +462,8 @@ class Engine:
             raise Hold(code, str(exc), **details) from exc
         try:
             self.remember_launch(pending, dict(instance=self.settings.instance, workspace_id=self.workspace_id,
-                                              pane_id=pane, terminal_id=row['terminal_id'], worker=name, thread_id=thread))
+                                              pane_id=pane, terminal_id=row['terminal_id'], worker=name, thread_id=thread,
+                                              parameters_fingerprint=fingerprint(values)))
         except OSError as exc:
             raise Hold('launch_record_unavailable', 'Could not record the initial prompt before sending it',
                        pane_id=pane, admission='not_attempted', phase='submission') from exc
@@ -425,11 +483,17 @@ class Engine:
             raise Hold('outcome_unknown', str(exc), pane_id=pane, thread_id=thread,
                        workspace_id=self.workspace_id, admission='unknown', phase='submission', cause=exc.code) from exc
         try:
-            self.finish_launch(pending, row)
+            self.record_launch_turn(pending, receipt['turn_id'])
+            self.rename(pane, 'status', f'{setting.tag}:RUN')
         except (Hold, OSError):
             # The verified receipt is valid even if the label update must wait.
             pass
         return dict(receipt, admission='accepted')
+
+    def record_launch_turn(self, path, turn):
+        record = self.launches[path]
+        if 'turn_id' not in record:
+            self.remember_launch(path, dict(record, turn_id=turn))
 
     def finish_launch(self, path, row):
         if row['status'].endswith(':START'):
@@ -462,13 +526,19 @@ class Engine:
 
     def query(self, pane_id, turn_id=None):
         row = self.worker_pane(pane_id)
-        if row.get('admission') in ('unknown', 'not_attempted') or not identifier(row.get('thread_id')):
+        if (row.get('admission') in ('unknown', 'not_attempted') or not identifier(row.get('thread_id'))
+                or (row.get('admitted_turn_id') and row.get('reason', {}).get('code') == 'binding_unverified')):
+            return row
+        if turn_id is None and row.get('admitted_turn_id') and row['state'] != 'done':
             return row
         if turn_id is None:
             turn_id = row.get('turn_id')
         if turn_id is None:
             return row
         result = self.agent('result', pane_id, '--turn-id', turn_id)
+        if (result.get('thread_id'), result.get('turn_id')) != (row['thread_id'], turn_id):
+            raise Hold('binding_unverified', 'The worker result did not identify the requested thread and turn',
+                       pane_id=pane_id, turn_id=turn_id)
         delivery = row['delivery'] if row.get('turn_id') == turn_id else 'none'
         return dict(result, pane_id=pane_id, worker=row['worker'], delivery=delivery)
 
@@ -562,9 +632,6 @@ class Engine:
                 continue
             try:
                 launch = self.pane_launch(pane)
-                if launch is not None and row.get('admission') == 'accepted':
-                    self.finish_launch(launch, row)
-                    continue
                 if row.get('recoverable') and identifier(row.get('thread_id')) and not row['pending_closure']:
                     self.agent('recover', pane)
                     continue
@@ -576,7 +643,7 @@ class Engine:
                 if row.get('admission') == 'unknown':
                     holds.append(dict(pane_id=pane, error=row['reason']))
                     continue
-                if row.get('creation_pending'):
+                if row.get('creation_pending') and row.get('admission') != 'accepted':
                     binding = self.agent('status', pane)
                     if binding.get('thread_id') and binding.get('worker') == row['worker']:
                         self.rename(pane, 'status', row['status'])
@@ -594,12 +661,14 @@ class Engine:
                     if result['state'] != 'done':
                         continue
                     status = f'{worker.tag}:UNREAD'
-                elif row['state'] == 'working' and row['status'].split(':')[1] in ('WAIT', 'ACK'):
+                elif row['state'] == 'working' and row['status'].split(':')[1] in ('START', 'WAIT', 'ACK'):
                     status = f'{worker.tag}:RUN'
                 else:
-                    continue
+                    status = row['status']
                 if row['status'] != status:
                     self.rename(pane, 'status', status)
+                if launch is not None and row['state'] == 'done' and status in (f'{worker.tag}:UNREAD', f'{worker.tag}:READ'):
+                    self.forget_launch(launch)
             except Hold as exc:
                 holds.append(dict(pane_id=pane, error=exc.as_dict()))
         return holds

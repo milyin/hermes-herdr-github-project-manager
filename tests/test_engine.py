@@ -1,7 +1,7 @@
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from subprocess import CompletedProcess
+from subprocess import CompletedProcess, TimeoutExpired
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -30,6 +30,8 @@ class Dependencies:
         self.closes = []
         self.provision_error = self.run_error = self.status_error = None
         self.close_hold = None
+        self.rename_errors = {}
+        self.turn_results = {}
         self.admitted_thread = 'thread'
         self.submissions = []
         self.quota_hold = False
@@ -43,6 +45,8 @@ class Dependencies:
         if operation == 'layout':
             return dict(workspace_id=workspace, tabs=[dict(zoomed=False, panes=self.rows)])
         if operation == 'rename':
+            if args[3] in self.rename_errors:
+                raise self.rename_errors[args[3]]
             row = next(pane for pane in self.rows if pane['pane_id'] == args[1])
             row[args[2][2:]] = args[3]
             return dict(row)
@@ -70,8 +74,13 @@ class Dependencies:
                 raise self.status_error
             return dict(self.result)
         if operation == 'result':
-            assert args == ('--turn-id', 'turn')
-            return dict(self.result, message='finished', parameters={'TASK': 'test'})
+            flag, turn = args
+            assert flag == '--turn-id'
+            if turn in self.turn_results:
+                return self.turn_results[turn]
+            if self.result['state'] == 'done' and turn == 'turn':
+                return dict(self.result, message='finished', parameters={'TASK': 'test'})
+            return dict(thread_id=self.result['thread_id'], turn_id=turn, state='working')
         if operation == 'run':
             assert payload['account'] == 'account'
             self.runs += 1
@@ -243,6 +252,111 @@ class Contract(unittest.TestCase):
         self.assertEqual(self.native.closes, ['w1:p2'])
         self.assertEqual(self.engine.execute('capacity')['available'], 1)
 
+    def test_codex_refusal_and_prewrite_deadline_allow_retry_after_restart(self):
+        for index, code in enumerate(('codex_rejected', 'deadline_elapsed'), 2):
+            with self.subTest(code=code):
+                native = Dependencies(self.native.result['working_directory'])
+                pane = f'w1:p{index}'
+                native.worker.update(pane_id=pane, terminal_id=f't{index}')
+                native.run_error = Hold(code, 'Definitive refusal from the receiver')
+                if code == 'deadline_elapsed':
+                    native.close_hold = 'tab_user_locked'
+                request = dict(name='worker', parameters={'TASK': code})
+                with self.assertRaises(Hold) as error:
+                    Engine(self.home, native).execute('run', **request)
+                self.assertEqual(error.exception.code, code)
+                self.assertEqual(error.exception.details['admission'], 'not_attempted')
+                self.assertEqual(native.closes, [pane])
+                if native.close_hold:
+                    self.assertEqual(error.exception.details['pane_id'], pane)
+                    self.assertEqual(Engine(self.home, native).execute('capacity')['available'], 0)
+                    native.rows.remove(native.worker)
+                    native.worker.pop('pending_closure')
+                native.run_error = None
+                engine = Engine(self.home, native)
+                self.assertEqual(engine.execute('capacity')['available'], 1)
+                self.assertEqual(engine.execute('run', **request)['admission'], 'accepted')
+                self.assertEqual(native.runs, 2)
+
+    def test_partial_write_and_missing_reply_deadlines_keep_the_prompt_on_hold(self):
+        timeouts = (('outcome_unknown', 'Timed out after a partial prompt write'),
+                    ('transport_error', 'Timed out waiting for the submission reply'))
+        for index, (code, message) in enumerate(timeouts, 2):
+            with self.subTest(code=code):
+                native = Dependencies(self.native.result['working_directory'])
+                native.worker.update(pane_id=f'w1:p{index}', terminal_id=f't{index}')
+                native.run_error = Hold(code, message)
+                request = dict(name='worker', parameters={'TASK': code})
+                with self.assertRaises(Hold) as error:
+                    Engine(self.home, native).execute('run', **request)
+                self.assertEqual((error.exception.code, error.exception.details['cause']), ('outcome_unknown', code))
+                self.assertEqual(native.closes, [])
+                native.rows.remove(native.worker)
+                with self.assertRaisesRegex(Hold, 'already has an unverified submission'):
+                    Engine(self.home, native).execute('run', **request)
+                self.assertEqual(native.runs, 1)
+
+    def test_lost_reply_delivers_blocked_turn_only_with_matching_run_metadata(self):
+        self.native.run_error = Hold('transport_error', 'Run receipt was lost')
+        with self.assertRaisesRegex(Hold, 'Run receipt was lost'):
+            self.engine.execute('run', name='worker', parameters={'TASK': 'test'})
+        self.native.result.update(state='blocked', turn_id='turn', active=True, attention=dict(
+            attention_id='ask', state='blocked', reason='approval', observed_at='2026-11-26T07:00:00Z'))
+        native_result = dict(thread_id='thread', turn_id='turn', state='working')
+        for proof in (native_result, dict(native_result, parameters={'TASK': 'different', 'PR': 'none'}),
+                      dict(native_result, thread_id='other', parameters={'TASK': 'test', 'PR': 'none'})):
+            self.native.turn_results['turn'] = proof
+            self.assertEqual(self.engine.execute('tick')['action'], 'capacity_held')
+        self.assertEqual(self.native.submissions, [])
+        self.native.turn_results['turn'] = dict(native_result, parameters={'PR': 'none', 'TASK': 'test'})
+        event = self.engine.execute('tick')
+        self.assertEqual((event['event'], event['turn_id'], event['attention_id']), ('worker_attention', 'turn', 'ask'))
+        self.assertEqual(self.native.worker['status'], 'I:WAIT:ask')
+        self.native.turn_results.clear()
+        engine = Engine(self.home, self.native)
+        row = engine.execute('query', pane_id='w1:p2')
+        self.assertEqual((row['admission'], row['admitted_turn_id'], row['state']), ('accepted', 'turn', 'blocked'))
+        engine.execute('mark_read', pane_id='w1:p2', turn_id='turn', attention_id='ask')
+        self.assertEqual(engine.execute('capacity')['occupied'], ['w1:p2'])
+        self.assertEqual(engine.execute('tick')['action'], 'capacity_held')
+        self.assertEqual(self.native.runs, 1)
+
+    def test_receipt_survives_label_refusal_and_excludes_a_different_attention_turn(self):
+        self.native.rename_errors['I:RUN'] = Hold('user_locked', 'The operator zoomed before the label update')
+        accepted = self.engine.execute('run', name='worker', parameters={'TASK': 'test'})
+        self.assertEqual((accepted['admission'], self.native.worker['status']), ('accepted', 'I:START'))
+        engine = Engine(self.home, self.native)
+        self.native.result.update(state='blocked', turn_id='operator-turn', active=True, attention=dict(
+            attention_id='ask', state='blocked', reason='approval', observed_at='2026-11-26T07:00:00Z'))
+        row = engine.execute('query', pane_id='w1:p2')
+        self.assertEqual((row['admission'], row['admitted_turn_id'], row['state']), ('accepted', 'turn', 'unknown'))
+        self.assertNotIn('turn_id', row)
+        self.assertEqual(engine.execute('tick')['action'], 'capacity_held')
+        self.native.result['turn_id'] = 'turn'
+        self.native.worker['user_locked'] = True
+        self.assertEqual(engine.execute('tick')['action'], 'capacity_held')
+        self.assertEqual(self.native.submissions, [])
+        self.native.worker['user_locked'] = False
+        event = engine.execute('tick')
+        self.assertEqual((event['event'], event['turn_id']), ('worker_attention', 'turn'))
+        with self.assertRaises(Hold) as error:
+            engine.execute('run', name='worker', parameters={'TASK': 'test'})
+        self.assertEqual((error.exception.code, error.exception.details['turn_id']), ('already_started', 'turn'))
+        self.assertEqual(self.native.runs, 1)
+        self.assertEqual(self.native.closes, [])
+
+    def test_working_observation_preserves_admission_for_later_approval(self):
+        self.native.run_error = Hold('transport_error', 'Run receipt was lost')
+        with self.assertRaises(Hold):
+            self.engine.execute('run', name='worker', parameters={'TASK': 'test'})
+        self.native.result.update(state='working', turn_id='turn', active=True)
+        self.assertEqual(self.engine.execute('query', pane_id='w1:p2')['admitted_turn_id'], 'turn')
+        self.native.result.update(state='blocked', attention=dict(
+            attention_id='ask', state='blocked', reason='approval', observed_at='2026-11-26T07:00:00Z'))
+        restarted = Engine(self.home, self.native)
+        self.assertEqual(restarted.execute('tick')['event'], 'worker_attention')
+        self.assertEqual(self.native.runs, 1)
+
     def test_lost_admission_is_held_until_the_original_thread_identifies_the_turn(self):
         self.native.run_error = Hold('transport_error', 'Run receipt was lost')
         with self.assertRaises(Hold) as error:
@@ -325,6 +439,14 @@ class Contract(unittest.TestCase):
             self.assertEqual(native.invoke([], bare=True), layout)
             with self.assertRaisesRegex(Hold, 'no verified successful receipt'):
                 native.invoke([])
+            child.return_value = CompletedProcess([], 0, json.dumps(dict(ok=False, error=dict(
+                code='deadline_elapsed', message='Timed out before writing'))))
+            with self.assertRaisesRegex(Hold, 'invalid error receipt'):
+                native.invoke([])
+            child.side_effect = TimeoutExpired('agent', 80)
+            with self.assertRaises(Hold) as error:
+                native.invoke([])
+            self.assertEqual(error.exception.code, 'transport_error')
 
     def test_quota_allows_equality(self):
         reset = '2026-11-26T00:10:00+00:00'
