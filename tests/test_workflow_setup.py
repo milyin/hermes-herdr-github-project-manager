@@ -8,7 +8,7 @@ import sys
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import yaml
 
@@ -65,68 +65,113 @@ class BundledWorkflows(unittest.TestCase):
 
 
 class StartupInterview(unittest.TestCase):
+    class GatewayClientError(ValueError):
+        pass
+
+    class GatewayRPCError(GatewayClientError):
+        pass
+
+    NOT_SENT = 'Gateway disconnected before the request was sent; nothing was sent.'
+
     def setUp(self):
         temp = TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.home = Path(temp.name)
         spec = importlib.util.spec_from_file_location('project_manager_plugin_fixture', ROOT / '__init__.py',
                                                       submodule_search_locations=[str(ROOT)])
-        plugin = self.plugin = importlib.util.module_from_spec(spec)
+        plugin = importlib.util.module_from_spec(spec)
         stack = ExitStack()
         self.addCleanup(stack.close)
-        stack.enter_context(patch.dict(sys.modules, {spec.name: plugin,
-                            'hermes_constants': SimpleNamespace(get_hermes_home=lambda: self.home)}))
+        self.discovery = SimpleNamespace(state='ready', endpoint='fixture')
+        self.rpc = AsyncMock()
+        connection = AsyncMock()
+        connection.__aenter__.return_value = SimpleNamespace(rpc=self.rpc)
+        gateway_client = SimpleNamespace(GatewayClientError=self.GatewayClientError, GatewayRPCError=self.GatewayRPCError,
+                                         connect_gateway=lambda _: connection, outside_restart_wait=nullcontext,
+                                         NOT_SENT=self.NOT_SENT)
+        gateway_runtime = SimpleNamespace(ensure_gateway_runtime=lambda *args, **kwargs: self.discovery,
+                                          attachable=lambda _: True)
+        stack.enter_context(patch.dict(sys.modules, {
+            spec.name: plugin,
+            'hermes_constants': SimpleNamespace(get_hermes_home=lambda: self.home),
+            'hermes_cli': SimpleNamespace(gateway_client=gateway_client, gateway_runtime=gateway_runtime),
+            'hermes_cli.gateway_client': gateway_client,
+            'hermes_cli.gateway_runtime': gateway_runtime,
+        }))
         spec.loader.exec_module(plugin)
         stack.enter_context(patch.object(plugin, 'raw_settings', return_value={'enabled': True}))
         stack.enter_context(patch.object(plugin, 'profile_context', side_effect=nullcontext))
         stack.enter_context(patch.object(plugin, 'setup', side_effect=plugin.Hold('invalid_config', 'manager is required')))
-        native = stack.enter_context(patch.object(plugin, 'Native'))
-        stack.enter_context(patch.object(plugin.threading, 'Thread', side_effect=lambda target, **_: Mock(start=target)))
+        stack.enter_context(patch.object(plugin, 'threading', SimpleNamespace(
+            Lock=plugin.threading.Lock, Thread=lambda target, **_: Mock(start=target))))
         self.logs = stack.enter_context(self.assertLogs(plugin.LOG, level='WARNING'))
-        native.return_value.binding = {'session_id': 'bound'}
-        self.gateway = native.return_value.gateway
-        self.gateway.return_value = {'admission_id': 'admitted'}
+        plugin.Native(self.home).save_binding({'workspace': 'w1', 'session_id': 'bound'})
+        self.snapshot = {'session_id': 'operator', 'running': False, 'pending': []}
+        self.receipt = {'ref': {'session_id': 'operator'}, 'admission_id': 'admitted'}
+        self.rpc.side_effect = [self.snapshot, self.receipt]
         ctx = Mock()
         plugin.register(ctx)
         self.hooks = dict(call.args for call in ctx.register_hook.call_args_list)
+
+    def methods(self):
+        return [call.args[0] for call in self.rpc.await_args_list]
 
     def test_startup_submits_interview_to_operator_once(self):
         self.hooks['on_session_open']('bound', 'tui')
         self.hooks['on_session_open']('operator', 'tui')
         self.hooks['on_session_start']('operator', 'tui')
 
-        self.gateway.assert_called_once()
-        operation, session, message = self.gateway.call_args.args
-        self.assertEqual((operation, session), ('submit', 'operator'))
+        self.assertEqual(self.methods(), ['session.resume', 'prompt.submit'])
+        self.assertEqual(self.rpc.await_args.kwargs['session_id'], 'operator')
+        message = self.rpc.await_args.kwargs['text']
         self.assertIn(str(ROOT / 'doc' / 'PROFILE.md'), message)
         self.assertIn(str(self.home / 'config.yaml'), message)
         self.assertIn('Start with the workflow choice', message)
         self.assertIn('GitHub App setup link', message)
 
     def test_startup_retries_definite_gateway_rejection(self):
-        rejection = self.plugin.Hold('gateway_unavailable', 'Hermes gateway is starting')
-        self.gateway.side_effect = [rejection, self.gateway.return_value]
+        self.discovery.state = 'starting'
         self.hooks['on_session_open']('operator', 'tui')
-        self.gateway.assert_called_once()
+        self.rpc.assert_not_awaited()
+        self.discovery.state = 'ready'
         self.hooks['on_session_start']('operator', 'tui')
         self.hooks['on_session_open']('operator', 'tui')
 
-        self.assertEqual(self.gateway.call_count, 2)
-        self.assertEqual(self.gateway.call_args_list[0], self.gateway.call_args_list[1])
+        self.assertEqual(self.methods(), ['session.resume', 'prompt.submit'])
         self.assertIn('gateway_unavailable', '\n'.join(self.logs.output))
 
-    def test_startup_holds_duplicate_after_uncertain_admission(self):
-        uncertain = self.plugin.Hold('outcome_unknown', 'Hermes did not confirm the exact admission')
-        self.gateway.side_effect = [uncertain, self.gateway.return_value]
+    def test_startup_retries_after_disconnect_during_resume(self):
+        self.rpc.side_effect = [self.GatewayClientError('Connection lost'), self.snapshot, self.receipt]
+        self.hooks['on_session_open']('operator', 'tui')
+        self.assertEqual(self.methods(), ['session.resume'])
+        self.hooks['on_session_start']('operator', 'tui')
+        self.hooks['on_session_open']('operator', 'tui')
+
+        self.assertEqual(self.methods(), ['session.resume', 'session.resume', 'prompt.submit'])
+        self.assertIn('gateway_unavailable', '\n'.join(self.logs.output))
+
+    def test_startup_retries_when_gateway_client_confirms_submit_was_not_sent(self):
+        self.rpc.side_effect = [self.snapshot, self.GatewayClientError(self.NOT_SENT), self.snapshot, self.receipt]
         self.hooks['on_session_open']('operator', 'tui')
         self.hooks['on_session_start']('operator', 'tui')
         self.hooks['on_session_open']('operator', 'tui')
 
-        self.gateway.assert_called_once()
+        self.assertEqual(self.methods(), ['session.resume', 'prompt.submit', 'session.resume', 'prompt.submit'])
+        self.assertIn('gateway_unavailable', '\n'.join(self.logs.output))
+
+    def test_startup_holds_duplicate_after_lost_submit_reply(self):
+        self.rpc.side_effect = [self.snapshot, self.GatewayClientError('Reply lost'),
+                                dict(self.snapshot, session_id='another-operator'),
+                                dict(self.receipt, ref={'session_id': 'another-operator'})]
+        self.hooks['on_session_open']('operator', 'tui')
+        self.hooks['on_session_start']('operator', 'tui')
+        self.hooks['on_session_open']('operator', 'tui')
+
+        self.assertEqual(self.methods(), ['session.resume', 'prompt.submit'])
         self.assertIn('outcome_unknown', '\n'.join(self.logs.output))
         self.hooks['on_session_open']('another-operator', 'tui')
-        self.assertEqual(self.gateway.call_count, 2)
-        self.assertEqual(self.gateway.call_args.args[:2], ('submit', 'another-operator'))
+        self.assertEqual(self.methods(), ['session.resume', 'prompt.submit', 'session.resume', 'prompt.submit'])
+        self.assertEqual(self.rpc.await_args.kwargs['session_id'], 'another-operator')
 
 
 class OptInLabel(unittest.TestCase):
