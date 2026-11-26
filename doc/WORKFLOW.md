@@ -20,6 +20,16 @@ The manager runs the workflow in a Hermes gateway session displayed in the termi
 
 Provide one implementation for each operation and use it from Hermes commands, manager tools and cron. They share the same profile binding, observations, guards and result fields. In particular, manual inspection and cron use the same pane, quota, and capacity queries.
 
+### Oversized worker handoffs
+
+The engine validates the complete prompt against the agent manager's 32,768-byte UTF-8 limit before it provisions a pane or changes a worker's delivery state. The manager can use the [validation receipt](COMMANDS.md#worker-commands) to confirm the prompt never reached the worker. Keep the original evidence on the manager side and resume only with a verified delivery path.
+
+- If a new run exceeds the limit because of its rendered template, use an eligible idle pane already assigned to the worker and task when the complete follow-up fits in `steer`. Include the references and evidence in that follow-up.
+- If the work has independently actionable parts, send one complete assignment per turn. For example, send two unrelated review findings as separate implementation assignments. Include each finding and its required evidence verbatim and repeat the issue, PR, and full head when applicable. Verify each admission and result, and recheck the current head and remaining scope before assigning the next part.
+- If a single complete assignment still exceeds the limit, hold it for the operator and report the measured size and the runtime limit. One worker turn accepts one prompt. Delivering an indivisible handoff requires a larger admitted prompt or an agent-manager facility that assembles all input before admitting the turn.
+
+Treat an uncertain submission as unresolved until the native turn has been reconciled. A validation refusal permits a revised assignment. It does not resolve any earlier uncertain submission.
+
 ## Manager conversation
 
 Open the selected profile's Hermes TUI in the manager pane. Group it with the workspace's initial shell when layout permits so zoom is available from first launch. The profile gateway runs the turns and owns the conversation. The TUI lets the operator view the transcript and talk to the manager. The watchdog connects through the authenticated local gateway interface to submit scheduled instructions and worker results into that same conversation. [Hermes TUI gateway](https://hermes-agent.nousresearch.com/docs/user-guide/tui#how-the-tui-talks-to-its-gateway)

@@ -52,6 +52,8 @@ GitHub's merge readiness and active branch rules are checked before the direct m
 
 The manager sends self-contained assignments in the worker's managed terminal. A review assignment carries the issue, PR, exact head, and implementation evidence. An implementation follow-up carries the references, reviewed head, actual findings, supporting details, and requested changes. Pane, turn and feedback IDs stay with the manager for tracking. The wiki records a short status and the identifiers needed to resume work. [Worker handoff boundary](../../doc/WORKFLOW.md#worker-handoff-boundary)
 
+For an oversized assignment, the manager can reuse an eligible idle pane if the complete follow-up fits, or assign independent implementation findings one at a time. An indivisible assignment that exceeds the limit stays blocked until the runtime can admit the complete evidence. [Oversized handoff recovery](../../doc/WORKFLOW.md#oversized-worker-handoffs)
+
 The reviewer publishes a submitted GitHub comment review pinned to the reviewed SHA and returns a short terminal notification. This is ordinary PR review publication. The manager verifies the publication, reads the findings, and includes their text in the implementer's terminal prompt. The App's review records the worker verdict. Approval still comes from an independent human reviewer on the exact current head. [Reviewer prompt](REVIEWER_PROMPT.md) · [GitHub review endpoint](https://docs.github.com/en/rest/pulls/reviews#create-a-review-for-a-pull-request)
 
 ## Profile settings

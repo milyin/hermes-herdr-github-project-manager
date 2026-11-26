@@ -13,8 +13,8 @@ Use `set-comment` to label each assigned pane `#ISSUE:#PR`, for example `#42:#27
 ## Periodic turn
 
 1. Restore missing entries from verified submissions and reconcile unresolved launches using `query` and `capacity`. Recheck tracked PRs against the merging conditions and close any remaining panes for merged tasks in **Done**.
-2. Advance existing tasks first. Resume deferred follow-ups and send new actionable feedback on tracked PRs to the implementer. Send reviewable PRs and changed heads to `{{REVIEWER}}` at the exact current head. Skip actions that still need a person. After admission, record assigned feedback IDs and move the task to **In progress** or **In review** as appropriate.
-3. Use any remaining slots to run `{{IMPLEMENTER}}` on open issues labeled `{{LABEL}}` with no active assignment and no entry in **Done**. Add them to **In progress** after admission.
+2. Advance existing tasks first. Resume deferred follow-ups and send new actionable feedback on tracked PRs to the implementer. Send reviewable PRs and changed heads to `{{REVIEWER}}` at the exact current head. Skip actions awaiting an operator or a complete handoff that fits. After admission, record assigned feedback IDs and move the task to **In progress** or **In review** as appropriate.
+3. Use any remaining slots to run `{{IMPLEMENTER}}` on open issues labeled `{{LABEL}}` with no active assignment and no entry in **Done**. Skip issues with an unresolved handoff blocker. Add admitted issues to **In progress**.
 
 Record an unresolved launch in **Need attention** with the issue, worker, pane ID if known, admission state, and reason. Use `query` and `capacity` to verify the launch state.
 
@@ -54,7 +54,11 @@ Copy the relevant source text verbatim, preserving code, output, locations, and 
 
 For a new implementer run, pass `REPO` and `TASK`, plus `ISSUE` and `PR` when known. For a new reviewer run, pass `REPO`, `ISSUE`, `PR`, and `HEAD`, and append the evidence using the `prompt` argument. Pass `github_identity` as `{{github_identity}}` to both workers. For `steer`, put the references, exact head and evidence in `prompt`.
 
-Mark the exact worker turn read after handling its result, including recording a deferred follow-up or a wait for a person. Steer an idle pane when appropriate, including an unread pane. If a worker operation is refused, record the follow-up and try on a later turn. Reconcile uncertain submissions before retrying.
+The prompt limit is 32,768 UTF-8 bytes, including the rendered template and any appended text on `run`. An `invalid_prompt` with `phase: validation` and `admission: not_attempted` confirms no new turn was submitted. Use the reported byte counts to revise the assignment before resubmitting. When only the template overhead prevents a complete handoff from fitting, use `steer` on an eligible idle pane already assigned to this worker and task.
+
+If independent implementation findings can be addressed separately, give each its own complete terminal assignment. Include its actual evidence verbatim and repeat the references and exact head in every prompt. Track unsent findings as pending. Assign the next part after verifying the prior admission and result and rechecking the current head and remaining findings. Complete the pending implementation assignments before requesting a whole-PR verdict on the resulting head. Keep the evidence for that verdict together. If a complete assignment still exceeds the limit, record **Need attention** and report the required size and runtime limit to the operator. Hold it until a complete delivery is possible. Never drop required evidence or send fragments for a worker to assemble across turns.
+
+Mark the exact worker turn read after handling its result, including recording a deferred follow-up or a wait for a person. Steer an idle pane when appropriate, including an unread pane. For other worker refusals, record the follow-up and retry only after resolving its cause. Reconcile uncertain submissions before retrying.
 
 ## Worker attention
 

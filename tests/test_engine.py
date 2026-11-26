@@ -87,6 +87,9 @@ class Dependencies:
             if self.run_error:
                 raise self.run_error
             return dict(status='accepted', thread_id=self.admitted_thread, turn_id='turn')
+        if operation == 'steer':
+            assert payload['account'] == 'account'
+            return dict(status='accepted', thread_id=self.result['thread_id'], turn_id='follow-up')
         if operation == 'recover':
             self.recoveries += 1
             self.result.update(state='idle', recoverable=False)
@@ -245,6 +248,103 @@ class Contract(unittest.TestCase):
             self.native.result.update(state='done', turn_id='turn')
             steered = self.engine.execute('steer', pane_id=implementer['pane_id'], prompt=follow_up)
             self.assertEqual(steered['transcript'], follow_up)
+
+    def test_run_checks_rendered_utf8_limit_before_provisioning(self):
+        parameters = {'TASK': 'Evidence 🧪', 'PR': '34'}
+        rendered = 'start Evidence 🧪 with 34\n\n'
+        evidence = '  café @file:fixture\r\n'
+        limit = 32768
+        prompt = evidence + ' ' * (limit - len((rendered + evidence).encode('utf-8')))
+        with (patch.object(self.native, 'preflight', wraps=self.native.preflight) as preflight,
+              patch.object(self.native, 'provision', wraps=self.native.provision) as provision,
+              patch.object(self.native, 'pane', wraps=self.native.pane) as pane):
+            with self.assertRaises(Hold) as rejected:
+                self.engine.execute('run', name='worker', parameters=parameters, prompt=prompt + 'x')
+        self.assertEqual(rejected.exception.code, 'invalid_prompt')
+        self.assertEqual(rejected.exception.details, dict(
+            phase='validation', admission='not_attempted', prompt_bytes=limit + 1, max_prompt_bytes=limit))
+        preflight.assert_not_called()
+        provision.assert_not_called()
+        pane.assert_not_called()
+        self.assertEqual(self.native.runs, 0)
+        self.assertEqual(self.native.closes, [])
+        capacity = self.engine.execute('capacity')
+        self.assertEqual(capacity['available'], 1)
+        self.assertEqual(capacity['unresolved_launches'], [])
+        self.assertEqual(self.engine.execute('tick')['event'], 'periodic')
+
+        with patch.object(self.native, 'agent', wraps=self.native.agent) as agent:
+            receipt = self.engine.execute('run', name='worker', parameters=parameters, prompt=prompt)
+        self.assertEqual(receipt['admission'], 'accepted')
+        self.assertEqual(agent.call_args.args[0], 'run')
+        self.assertEqual(agent.call_args.kwargs['payload']['prompt'], rendered + prompt)
+
+    def test_oversized_handoff_can_use_an_existing_idle_pane_when_it_fits_steer(self):
+        pane = self.native.worker['pane_id']
+        self.native.worker['status'] = 'I:UNREAD'
+        self.native.rows.append(self.native.worker)
+        prior = self.engine.execute('query', pane_id=pane, turn_id='turn')
+        references = f'owner/repository issue #12, PR #34 at {"a" * 40}\n\n'
+        evidence = 'Fix the CRLF handler. Evidence starts here.\r\n  🧪 café\n'
+        prompt = references + evidence
+        prompt += ' ' * (32768 - len(prompt.encode('utf-8')))
+
+        with (patch.object(self.native, 'pane', wraps=self.native.pane) as operations,
+              patch.object(self.native, 'agent', wraps=self.native.agent) as agent):
+            with self.assertRaises(Hold) as oversized_run:
+                self.engine.execute('run', name='worker', parameters={'TASK': 'Review feedback'}, prompt=prompt)
+            with self.assertRaises(Hold) as oversized_steer:
+                self.engine.execute('steer', pane_id=pane, prompt=prompt + 'x')
+            with self.assertRaises(Hold) as invalid_utf8:
+                self.engine.execute('steer', pane_id=pane, prompt='\ud800')
+        self.assertEqual(oversized_run.exception.details['phase'], 'validation')
+        self.assertEqual(oversized_steer.exception.code, 'invalid_prompt')
+        self.assertEqual(oversized_steer.exception.details, dict(
+            phase='validation', admission='not_attempted', prompt_bytes=32769, max_prompt_bytes=32768))
+        self.assertEqual(invalid_utf8.exception.code, 'invalid_prompt')
+        self.assertEqual(invalid_utf8.exception.details['admission'], 'not_attempted')
+        operations.assert_not_called()
+        agent.assert_not_called()
+        self.assertEqual(self.engine.execute('query', pane_id=pane, turn_id='turn'), prior)
+        self.assertEqual(self.native.worker['status'], 'I:UNREAD')
+        self.assertEqual(self.engine.execute('capacity')['available'], 1)
+
+        with patch.object(self.native, 'agent', wraps=self.native.agent) as agent:
+            receipt = self.engine.execute('steer', pane_id=pane, prompt=prompt)
+        self.assertEqual(receipt['turn_id'], 'follow-up')
+        self.assertEqual(agent.call_args.args[0], 'steer')
+        self.assertEqual(agent.call_args.kwargs['payload']['prompt'], prompt)
+        self.assertEqual(self.native.runs, 0)
+
+    def test_oversized_batch_can_be_reassigned_as_independent_terminal_turns(self):
+        head = 'a' * 40
+        new_head = 'b' * 40
+        references = f'owner/repository issue #12, PR #34, reviewed head {head}\n'
+        first = 'parser.py:38: preserve trailing spaces.\r\n  Fixture output:\n' + 'é' * 9000 + '  \n'
+        second = 'writer.py:21: retain the final newline.\r\n  Fixture output:\n' + '🧪' * 4500 + '\n'
+        first_task = references + f'Working head {head}\n\n' + first
+        second_task = references + f'Working head {new_head}\n\n' + second
+
+        with self.assertRaises(Hold) as combined:
+            self.engine.execute('run', name='worker', parameters={'TASK': first_task + second})
+        self.assertEqual(combined.exception.details['admission'], 'not_attempted')
+        self.assertEqual(self.native.runs, 0)
+
+        with patch.object(self.native, 'agent', wraps=self.native.agent) as agent:
+            admitted = self.engine.execute('run', name='worker', parameters={'TASK': first_task})
+            self.assertEqual(admitted['admission'], 'accepted')
+            self.assertEqual(agent.call_args.kwargs['payload']['prompt'], 'start ' + first_task + ' with none')
+            self.native.result.update(state='done', turn_id=admitted['turn_id'])
+            self.native.turn_results[admitted['turn_id']] = dict(
+                self.native.result, message=f'First finding fixed, pushed {new_head}.')
+            result = self.engine.execute('query', pane_id=admitted['pane_id'], turn_id=admitted['turn_id'])
+            self.assertEqual(result['message'], f'First finding fixed, pushed {new_head}.')
+            self.engine.execute('mark_read', pane_id=admitted['pane_id'], turn_id=admitted['turn_id'])
+
+            follow_up = self.engine.execute('steer', pane_id=admitted['pane_id'], prompt=second_task)
+            self.assertEqual(follow_up['turn_id'], 'follow-up')
+            self.assertEqual(agent.call_args.kwargs['payload']['prompt'], second_task)
+        self.assertEqual(self.native.runs, 1)
 
     def test_periodic_is_held_with_a_verified_busy_worker_at_limit_one(self):
         self.native.rows.append(self.native.worker)
