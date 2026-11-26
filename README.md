@@ -2,7 +2,7 @@
 
 A Hermes skill and plugin for coordinating named workers from a dedicated Hermes terminal pane in Herdr. Workers have interactive Codex panes. Project-specific rules live in configurable prompts.
 
-Install the skill, its Hermes plugin and the [companion pane and agent managers](doc/WORKFLOW.md#dependency-skill-requirements) in the same Hermes profile. Set up the [profile](doc/PROFILE.md) and open it. The Hermes [commands](doc/COMMANDS.md) expose the same worker and inspection operations the watchdog uses.
+Install the skill, its Hermes plugin and the [companion pane and agent managers](doc/WORKFLOW.md#dependency-skill-requirements) in the same Hermes profile. Open the [profile](doc/PROFILE.md) and choose the bundled GitHub workflow or the local hello-world demo in the [setup interview](doc/PROFILE.md#setup-interview). The GitHub workflow uses a [scoped GitHub App helper](doc/GITHUB_APP.md). The Hermes [commands](doc/COMMANDS.md) expose the same worker and inspection operations the watchdog uses.
 
 The [workflow specification](doc/WORKFLOW.md) defines the engine and prompt contracts. The GitHub example includes a [manager](doc/MANAGER_PROMPT.md), [implementer](doc/IMPLEMENTER_PROMPT.md), and [reviewer](doc/REVIEWER_PROMPT.md).
 

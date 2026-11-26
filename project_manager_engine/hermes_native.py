@@ -168,55 +168,60 @@ class Native:
             temporary.unlink(missing_ok=True)
 
     def gateway(self, action, *args):
-        from hermes_cli.gateway_client import GatewayClientError, GatewayRPCError
-        try:
-            return asyncio.run(self.gateway_async(action, *args))
-        except Hold:
-            raise
-        except GatewayRPCError as exc:
-            raise Hold(str(exc), 'Hermes gateway refused the operation') from exc
-        except (GatewayClientError, OSError, RuntimeError, TimeoutError) as exc:
-            code = 'outcome_unknown' if action == 'submit' else 'gateway_unavailable'
-            raise Hold(code, 'Hermes gateway did not return a verified reply') from exc
+        return asyncio.run(self.gateway_async(action, *args))
 
     async def gateway_async(self, action, *args):
-        from hermes_cli.gateway_client import connect_gateway, outside_restart_wait
+        from hermes_cli import gateway_client
         from hermes_cli.gateway_runtime import ensure_gateway_runtime, attachable
-        with outside_restart_wait():
-            discovery = await asyncio.to_thread(ensure_gateway_runtime, self.home, idle_exit=False)
-            if not attachable(discovery) or discovery.state != 'ready':
-                raise Hold('gateway_unavailable', f'Hermes gateway is {discovery.state}')
-            async with connect_gateway(discovery.endpoint) as gateway:
-                if action == 'create':
-                    request_id, = args
-                    return await gateway.rpc('session.create', request_id=request_id, source='tui',
-                                             cwd=self.settings.manager.cwd, model=self.settings.manager.model,
-                                             _timeout=30)
-                sid, *rest = args
-                if action == 'info':
-                    return await gateway.rpc('session.info', session_id=sid, _timeout=10)
-                snapshot = await gateway.rpc('session.resume', session_id=sid, omit_messages=True, _timeout=10)
-                if snapshot.get('session_id') != sid:
-                    raise Hold('session_changed', 'Hermes returned a different manager conversation')
-                if action == 'snapshot':
-                    return snapshot
-                if action == 'recover_admission':
-                    row = unknown_watchdog_admission(snapshot, sid)
-                    if row is not None:
-                        return await gateway.rpc('prompt.resolve_unknown', session_id=sid,
-                                                 admission_id=row['admission_id'],
-                                                 execution_generation=row['execution_generation'],
-                                                 _timeout=15)
-                    return {}
-                if not idle_snapshot(snapshot):
-                    raise Hold('manager_busy', 'The Hermes conversation has running or queued input')
-                message, = rest
-                receipt = await gateway.rpc('prompt.submit', session_id=sid, text=message,
-                                            submission_id=WATCHDOG_INPUT + secrets.token_hex(16), _timeout=15)
-                if ((receipt.get('ref') or {}).get('session_id') != sid
-                        or not isinstance(receipt.get('admission_id'), str)):
-                    raise Hold('outcome_unknown', 'Hermes did not confirm the exact admission')
-                return receipt
+        submit_attempted = False
+        try:
+            with gateway_client.outside_restart_wait():
+                discovery = await asyncio.to_thread(ensure_gateway_runtime, self.home, idle_exit=False)
+                if not attachable(discovery) or discovery.state != 'ready':
+                    raise Hold('gateway_unavailable', f'Hermes gateway is {discovery.state}')
+                async with gateway_client.connect_gateway(discovery.endpoint) as gateway:
+                    if action == 'create':
+                        request_id, = args
+                        return await gateway.rpc('session.create', request_id=request_id, source='tui',
+                                                 cwd=self.settings.manager.cwd, model=self.settings.manager.model,
+                                                 _timeout=30)
+                    sid, *rest = args
+                    if action == 'info':
+                        return await gateway.rpc('session.info', session_id=sid, _timeout=10)
+                    snapshot = await gateway.rpc('session.resume', session_id=sid, omit_messages=True, _timeout=10)
+                    if not isinstance(snapshot, dict) or snapshot.get('session_id') != sid:
+                        raise Hold('session_changed', 'Hermes returned a different manager conversation')
+                    if action == 'snapshot':
+                        return snapshot
+                    if action == 'recover_admission':
+                        row = unknown_watchdog_admission(snapshot, sid)
+                        if row is not None:
+                            return await gateway.rpc('prompt.resolve_unknown', session_id=sid,
+                                                     admission_id=row['admission_id'],
+                                                     execution_generation=row['execution_generation'],
+                                                     _timeout=15)
+                        return {}
+                    if not idle_snapshot(snapshot):
+                        raise Hold('manager_busy', 'The Hermes conversation has running or queued input')
+                    message, = rest
+                    submission_id = WATCHDOG_INPUT + secrets.token_hex(16)
+                    submit_attempted = True
+                    receipt = await gateway.rpc('prompt.submit', session_id=sid, text=message,
+                                                submission_id=submission_id, _timeout=15)
+                    ref = receipt.get('ref') if isinstance(receipt, dict) else None
+                    if (not isinstance(ref, dict) or ref.get('session_id') != sid
+                            or not isinstance(receipt.get('admission_id'), str)):
+                        raise Hold('outcome_unknown', 'Hermes did not confirm the exact admission')
+                    return receipt
+        except Hold:
+            raise
+        except gateway_client.GatewayRPCError as exc:
+            raise Hold(str(exc), 'Hermes gateway refused the operation') from exc
+        except (gateway_client.GatewayClientError, OSError, RuntimeError, asyncio.TimeoutError) as exc:
+            known_unsent = (isinstance(exc, gateway_client.GatewayClientError)
+                            and str(exc) == getattr(gateway_client, 'NOT_SENT', None))
+            code = 'outcome_unknown' if submit_attempted and not known_unsent else 'gateway_unavailable'
+            raise Hold(code, 'Hermes gateway did not return a verified reply') from exc
 
     def prepare_manager(self, workspace, pane):
         manager = self.settings.manager

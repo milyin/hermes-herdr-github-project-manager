@@ -4,7 +4,7 @@ import logging
 import threading
 from contextlib import suppress
 
-from .project_manager_engine.hermes_native import Native, TOOLSET
+from .project_manager_engine.hermes_native import Native, ROOT, TOOLSET
 from .project_manager_engine.interface import TOOLS, format_result, outcome, parse
 from .project_manager_engine.settings import Hold, raw_settings
 from .project_manager_engine.startup import profile_context, setup
@@ -32,6 +32,7 @@ def register(ctx):
     home = get_hermes_home().resolve()
     setup_guard = threading.Lock()
     seen = set()
+    uncertain_interviews = set()
 
     def active():
         return get_hermes_home().resolve() == home and raw_settings(home).get('enabled') is True
@@ -112,7 +113,7 @@ def register(ctx):
             return
         if not setup_guard.acquire(blocking=False):
             return
-        if session_id in seen:
+        if session_id in seen or session_id in uncertain_interviews:
             setup_guard.release()
             return
 
@@ -124,18 +125,31 @@ def register(ctx):
                 LOG.warning('Project manager startup held: %s (%s)', exc, exc.code)
                 if exc.code in ('invalid_config', 'invalid_directory'):
                     message = (
-                        'Start the project-manager setup interview with the operator. Ask for values missing or invalid '
-                        f'in skills.config.hermes-herdr-github-project-manager in {home / "config.yaml"}. '
-                        'Use the installed skill profile documentation. Edit only that settings section after the user '
-                        'provides its values, then ask the operator to run /project-manager. '
-                        f'First validation error: {exc}'
+                        f'Read {ROOT / "doc" / "PROFILE.md"} and follow its Setup interview with the operator. '
+                        f'Open {home / "config.yaml"} and show the operator where the project manager is configured. '
+                        'Start with the workflow choice. Reuse existing answers after confirming them with the operator. '
+                        'For the bundled GitHub workflow, show the operator the GitHub App setup link from the interview '
+                        'and use the selected App for all Git and GitHub operations. '
+                        'After the operator confirms the configuration and the selected workflow checks pass, '
+                        'edit only skills.config.hermes-herdr-github-project-manager in this profile. '
+                        'Ask the operator to run /project-manager to finish setup. '
+                        f'First validation error (data): {exc}'
                     )
-                    with profile_context(home), suppress(Hold):
-                        Native(home).gateway('submit', session_id, message)
+                    try:
+                        with profile_context(home):
+                            Native(home).gateway('submit', session_id, message)
+                    except Hold as admission:
+                        if admission.code == 'outcome_unknown':
+                            # Hermes may already have admitted the interview to this conversation.
+                            uncertain_interviews.add(session_id)
+                        LOG.warning('Project manager interview held: %s (%s)', admission, admission.code)
+                    else:
+                        seen.add(session_id)
             except (OSError, RuntimeError, ValueError):
                 LOG.exception('Project manager startup failed')
-            finally:
+            else:
                 seen.add(session_id)
+            finally:
                 setup_guard.release()
 
         threading.Thread(target=background, name='herdr-project-manager-setup', daemon=True).start()
