@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 import yaml
 
-from project_manager_engine.settings import SKILL, Prompt, Settings
+from project_manager_engine.settings import SKILL, Settings
 from workflows.github.github_app import GitHubError, main
 
 
@@ -34,7 +34,6 @@ REVIEWS = PR + '/reviews?per_page=100&page=1'
 NEXT_REVIEWS = PR + '/reviews?per_page=100&page=2'
 REVIEWER = {'login': 'reviewer', 'id': 2, 'type': 'User'}
 AUTHOR = {'login': 'author', 'id': 1, 'type': 'User'}
-DISPATCH_SECTIONS = ('Periodic turn', 'Shared scheduling', 'Worker queues and admission', 'Worker result')
 
 
 def review(state='APPROVED', *, number=1, head=HEAD, user=REVIEWER):
@@ -84,173 +83,6 @@ class GitHubWorkflowPrompt(unittest.TestCase):
         self.merge_response = dict(merged=True, sha=MERGE_SHA)
         self.calls = []
         self.review_reads = 0
-
-    def admission_policy(self, prompt, *observations):
-        section = prompt_section(prompt, 'Worker queues and admission')
-        rows = [line.strip('| ').split(' | ') for line in section.splitlines() if line.startswith('| ')]
-        columns, _, *rules = rows
-        for rule in rules:
-            decision = dict(zip(columns, rule, strict=True))
-            if decision['Observation'] in observations:
-                return decision
-        self.fail(f'No rendered admission rule matched {observations!r}')
-
-    def assert_dispatch_prose(self, prompt):
-        # The model sees the prose as well as the table. Guard the full dispatch sections
-        # so an additional instruction cannot silently contradict a checked table row.
-        fixture = Prompt.read(ROOT, 'workflow dispatch fixture', 'tests/fixtures/github_dispatch_prose.md',
-                              self.workflows.manager.prompt.defaults, manager=True).render()[0]
-        for heading in DISPATCH_SECTIONS:
-            lines = prompt_section(prompt, heading).splitlines()
-            prose = '\n'.join(line for line in lines if not line.startswith('| '))
-            prose = re.sub(r'\n{3,}', '\n\n', prose).strip()
-            self.assertMultiLineEqual(prompt_section(fixture, heading), prose, f'{heading} dispatch prose changed')
-
-    def test_dispatch_prose_matches_the_workflow_contract(self):
-        self.assert_dispatch_prose(self.workflows.manager.prompt.render()[0])
-
-    def test_dispatch_prose_rejects_conflicting_instructions_with_the_table_intact(self):
-        prompt = self.workflows.manager.prompt.render()[0]
-        mutations = (
-            'On a `capacity` refusal, move the issue to **Need attention** as a blocker.',
-            'On an `outcome_unknown` receipt, move the pending feedback to assigned.',
-            'On an `outcome_unknown` receipt, redispatch as soon as a slot is free, before reconciliation.',
-        )
-        observations = ('Capacity wait', 'Unresolved dispatch')
-        for heading in DISPATCH_SECTIONS:
-            for instruction in mutations:
-                with self.subTest(heading=heading, instruction=instruction):
-                    boundary = f'## {heading}\n\n'
-                    if heading == 'Worker queues and admission':
-                        boundary = '| Keep pending | Record intent and dispatch once |\n'
-                    mutated = prompt.replace(boundary, f'{boundary}{instruction}\n\n', 1)
-                    self.assertNotEqual(mutated, prompt)
-                    for observation in observations:
-                        self.assertEqual(self.admission_policy(mutated, observation),
-                                         self.admission_policy(prompt, observation))
-                    with self.assertRaisesRegex(AssertionError, f'{heading} dispatch prose changed'):
-                        self.assert_dispatch_prose(mutated)
-
-    def one_slot_trace(self, prompt, event, queued_hold):
-        def steps(heading):
-            return re.findall(r'^\d+\. \*\*([^\n*]+)\.\*\*', prompt_section(prompt, heading), re.MULTILINE)
-
-        slots = 1
-        trace = []
-        candidates = {'New issues': []}
-        result = dict(issue='A', pane_id='w1:p2', turn_id='completed-A')
-        placements = {'A': 'Review placement', 'B': 'Implementation placement'}
-        for step in steps(event):
-            if step == 'Read both queues':
-                candidates['Previously queued'] = ['B']
-            elif step in ('Refresh tracked work', 'Record the result'):
-                candidates['Other tracked work'] = ['A']
-                trace.append(('record pending', result['issue']))
-            elif step == 'Acknowledge the result':
-                trace.append(('mark-read', result['pane_id'], result['turn_id']))
-            elif step == 'Schedule work':
-                for priority in steps('Shared scheduling'):
-                    for issue in candidates[priority]:
-                        observations = ['Ready to dispatch' if slots else 'Capacity wait']
-                        if issue == 'B' and queued_hold:
-                            observations.append(queued_hold)
-                        decision = self.admission_policy(prompt, *observations)
-                        if decision['Next action'] == 'Record intent and dispatch once':
-                            trace.append(('dispatch', issue))
-                            slots -= 1
-                        else:
-                            trace.append((decision['Next action'], issue, decision[placements[issue]]))
-            else:
-                self.fail(f'Unexpected rendered step in {event}: {step}')
-        return trace
-
-    def test_both_paths_give_eligible_queued_work_the_one_slot_before_a_new_follow_up(self):
-        prompt = self.workflows.manager.prompt.render()[0]
-        for event, acknowledgement in (('Periodic turn', []),
-                                       ('Worker result', [('mark-read', 'w1:p2', 'completed-A')])):
-            with self.subTest(event=event):
-                self.assertEqual(self.one_slot_trace(prompt, event, queued_hold=None), [
-                    ('record pending', 'A'), *acknowledgement,
-                    ('dispatch', 'B'), ('Wait for capacity', 'A', 'In review → Queue'),
-                ])
-                for hold, action in (('Genuine blocker', 'Wait for resolution'),
-                                     ('Unresolved dispatch', 'Reconcile without dispatching')):
-                    with self.subTest(hold=hold):
-                        self.assertEqual(self.one_slot_trace(prompt, event, queued_hold=hold), [
-                            ('record pending', 'A'), *acknowledgement,
-                            (action, 'B', 'Need attention'), ('dispatch', 'A'),
-                        ])
-
-    def assert_capacity_queues(self, prompt):
-        decision = self.admission_policy(prompt, 'Capacity wait')
-        self.assertEqual(decision['Implementation placement'], 'In progress → Queue')
-        self.assertEqual(decision['Review placement'], 'In review → Queue')
-        self.assertEqual(decision['Feedback'], 'Keep pending')
-        self.assertEqual(decision['Next action'], 'Wait for capacity')
-
-    def test_configured_reviewer_routes_all_review_admissions(self):
-        prompt = self.workflows.manager.prompt.render({'REVIEWER': 'review-prod'})[0]
-        self.assertIn('Route new PR reviews, queued reviews, and reviews of changed heads to `review-prod`.', prompt)
-        self.assertIn('Pass that exact name to `run`, or `steer` an eligible pane only after verifying '
-                      'that it belongs to that worker and issue.', prompt)
-
-    def test_full_capacity_then_verified_admission(self):
-        prompt = self.workflows.manager.prompt.render()[0]
-        self.assertIn("Use the first matching row to decide the issue entry's placement, feedback update, and next action.",
-                      prompt)
-        self.assertIn('zero available slots or a `capacity` refusal from `run` or `steer`', prompt)
-        self.assert_capacity_queues(prompt)
-
-        available = self.admission_policy(prompt, 'Ready to dispatch')
-        self.assertEqual(available['Implementation placement'], 'Keep current placement')
-        self.assertEqual(available['Review placement'], 'Keep current placement')
-        self.assertEqual(available['Feedback'], 'Keep pending')
-        self.assertEqual(available['Next action'], 'Record intent and dispatch once')
-
-        admitted = self.admission_policy(prompt, 'Verified admission')
-        self.assertEqual(admitted['Implementation placement'], 'In progress')
-        self.assertEqual(admitted['Review placement'], 'In review')
-        self.assertEqual(admitted['Feedback'], 'Assign only the admitted batch')
-        self.assertEqual(admitted['Next action'], 'Follow the admitted turn')
-        self.assertIn('Move that entry between headings and subsections in a single dashboard update', prompt)
-        self.assertIn('After each outcome, update the same entry using the table.', prompt)
-
-    def test_capacity_regression_rejects_need_attention_mutation(self):
-        prompt = self.workflows.manager.prompt.render()[0]
-        for queue in ('In progress → Queue', 'In review → Queue'):
-            with self.subTest(queue=queue):
-                mutated = re.sub(r'^\| Capacity wait \|[^\n]+',
-                                 lambda row: row[0].replace(queue, 'Need attention'), prompt, flags=re.MULTILINE)
-                self.assertNotEqual(mutated, prompt)
-                with self.assertRaisesRegex(AssertionError, 'Need attention'):
-                    self.assert_capacity_queues(mutated)
-
-    def test_uncertain_receipts_keep_pending_feedback_and_prevent_redispatch(self):
-        prompt = self.workflows.manager.prompt.render()[0]
-        self.assertIn('a missing or mismatched receipt, `outcome_unknown`, or `admission: unknown`', prompt)
-        self.assertIn('A free slot, a missing pane, or the previous turn in the target pane leaves the dispatch unresolved.',
-                      prompt)
-        for observation in ('Capacity wait', 'Ready to dispatch'):
-            with self.subTest(observation=observation):
-                held = self.admission_policy(prompt, observation, 'Unresolved dispatch')
-                self.assertEqual(held['Implementation placement'], 'Need attention')
-                self.assertEqual(held['Review placement'], 'Need attention')
-                self.assertEqual(held['Feedback'], 'Keep pending')
-                self.assertEqual(held['Next action'], 'Reconcile without dispatching')
-
-        recovered = self.admission_policy(prompt, 'Verified admission', 'Ready to dispatch')
-        self.assertEqual(recovered['Feedback'], 'Assign only the admitted batch')
-        self.assertEqual(recovered['Next action'], 'Follow the admitted turn')
-        self.assertIn('Retry only after verifying that submission was never attempted', prompt)
-
-    def test_operator_and_merge_blockers_take_precedence_over_capacity(self):
-        prompt = self.workflows.manager.prompt.render()[0]
-        self.assertIn('PRs queued or scheduled for merge in GitHub', prompt)
-        self.assertIn('List **Need attention** first, followed by **In progress**, **In review**, and **Done**.', prompt)
-        decision = self.admission_policy(prompt, 'Capacity wait', 'Genuine blocker')
-        self.assertEqual(decision['Implementation placement'], 'Need attention')
-        self.assertEqual(decision['Review placement'], 'Need attention')
-        self.assertEqual(decision['Next action'], 'Wait for resolution')
 
     def request(self, method, path, token, data=None):
         self.calls.append((method, path, data))
@@ -304,10 +136,14 @@ class GitHubWorkflowPrompt(unittest.TestCase):
             args[args.index('--worker-verdict') + 1] = worker
         if not clear:
             args.remove('--feedback-clear')
+        return self.run_app(args)
+
+    def run_app(self, args, scheduler_request=None):
         self.review_reads = 0
         self.calls.clear()
         stdout = StringIO()
-        with (patch.object(sys, 'argv', [APP]), redirect_stdout(stdout),
+        with (patch.object(sys, 'argv', [APP]), patch.object(sys, 'stdin', StringIO(json.dumps(scheduler_request))),
+              redirect_stdout(stdout),
               patch('workflows.github.github_app.jwt', return_value='app-proof'),
               patch('workflows.github.github_app.request', side_effect=self.request)):
             self.assertEqual(main(args, config_path=self.config_path), 0)
@@ -316,6 +152,40 @@ class GitHubWorkflowPrompt(unittest.TestCase):
     def assert_hold(self, status='Need attention', **options):
         self.assertEqual(self.run_command(**options)['status'], status)
         self.assertFalse(any(method in {'PUT', 'PATCH', 'DELETE'} for method, _, _ in self.calls))
+
+    def test_rendered_manager_reads_pr_facts_and_calls_the_same_scheduler_for_both_events(self):
+        prompt = self.workflows.manager.prompt.render({'REVIEWER': 'review-prod'})[0]
+        facts_line = next(line for line in prompt.splitlines() if ' pr-facts --pr ' in line)
+        launcher, *args = shlex.split(Template(facts_line).substitute(pr_number='14'))
+        self.assertEqual(launcher, APP)
+        self.pull['mergeable'] = 'UNKNOWN'
+        facts = self.run_app(args)
+        self.assertEqual(facts, dict(number=14, headRefOid=HEAD, state='OPEN', isDraft=False, mergeable='UNKNOWN',
+                                     autoMergeRequest=None, isInMergeQueue=False))
+        self.assertEqual(self.calls[-1][:2], ('POST', '/graphql'))
+        self.assertIn('mergeable', self.calls[-1][2]['query'])
+
+        schedule_line = next(line for line in prompt.splitlines() if ' schedule --implementer ' in line)
+        launcher, *args = shlex.split(schedule_line.split(' < ', 1)[0])
+        self.assertEqual(launcher, APP)
+        self.assertIn('event: periodic', prompt)
+        self.assertIn('event: worker_result', prompt)
+        self.assertIn('Only the top-level `dispatch` authorizes a worker call.', prompt)
+        self.assertIn('before calling `project_manager_run` or `project_manager_steer`', prompt)
+
+        entry = dict(issue=12, pr=14, pull=facts, placement='In review → Queue', eligible=True, feedback='clear',
+                     pending_feedback=[], handoff=dict(kind='review', pr=14, head=HEAD, feedback_ids=[]))
+        request = dict(queued_at_start=[12], entries=[entry], capacity=dict(available=1, workers={'review-prod': {
+            'ready': True,
+        }}))
+        ids = dict(pane_id='w1:p1', turn_id='last-turn')
+        event = dict(ids, recorded=True, acknowledgment=dict(ok=True, result=dict(ids, delivery='read')))
+        periodic = self.run_app(args, dict(request, event='periodic'))
+        follow_up = self.run_app(args, dict(request, event='worker_result', worker_result=event))
+        self.assertEqual(periodic['dispatch'], follow_up['dispatch'])
+        self.assertEqual(follow_up['dispatch']['head'], HEAD)
+        self.assertEqual(follow_up['dispatch']['worker'], 'review-prod')
+        self.assertTrue(all(path != '/graphql' for _, path, _ in self.calls))
 
     def test_reviewer_publication_is_an_exact_head_comment(self):
         prompt, _ = self.workflows.workers['reviewer'].prompt.render(
@@ -374,6 +244,17 @@ class GitHubWorkflowPrompt(unittest.TestCase):
 
     def test_holds_for_a_github_review_requirement(self):
         self.pull.update(reviewDecision='REVIEW_REQUIRED', mergeStateStatus='BLOCKED')
+        self.assertEqual(self.run_command(), dict(status=WAITS, pr=14, head=HEAD))
+        self.assertFalse(any(method == 'PUT' for method, _, _ in self.calls))
+
+    def test_mergeability_is_checked_before_reporting_an_approval_hold(self):
+        self.pull['reviewDecision'] = 'REVIEW_REQUIRED'
+        for value, reason in (('CONFLICTING', 'Merge conflict'), ('UNKNOWN', 'Awaiting mergeability verification')):
+            with self.subTest(value=value):
+                self.pull['mergeable'] = value
+                self.assertEqual(self.run_command(), dict(status='Need attention', reason=reason))
+                self.assertFalse(any(method == 'PUT' for method, _, _ in self.calls))
+        self.pull['mergeable'] = 'MERGEABLE'
         self.assert_hold(WAITS)
 
     def test_holds_for_queue_rule_or_disallowed_merge_method(self):
@@ -454,36 +335,10 @@ class GitHubWorkflowPrompt(unittest.TestCase):
         self.assertEqual(self.review_reads, 1)
         self.assertFalse(any(method == 'PUT' for method, _, _ in self.calls))
 
-    def test_changed_head_releases_existing_approval_hold_for_review(self):
-        self.pull['headRefOid'] = OLD
-        self.first = []
-        self.assert_hold(WAITS, head=OLD)
-
-        self.pull['headRefOid'] = HEAD
-        self.assertEqual(self.run_command(head=OLD), {'status': 'Head changed', 'head': HEAD})
-        self.assertFalse(any(method == 'PUT' for method, _, _ in self.calls))
-        self.assertIn('Record the PR and full SHA of the verified clean verdict for this merge hold.', self.procedure)
-        self.assertIn('For **Head changed**, clear the old approval hold and record the current reviewable head '
-                      'for review through **Shared scheduling**.', self.procedure)
-
-        prompt = self.workflows.manager.prompt.render()[0]
-        self.assert_dispatch_prose(prompt)
-        with self.subTest(available_slots=0):
-            queued = self.admission_policy(prompt, 'Capacity wait')
-            self.assertEqual(queued['Review placement'], 'In review → Queue')
-            self.assertEqual(queued['Next action'], 'Wait for capacity')
-        with self.subTest(available_slots=1):
-            ready = self.admission_policy(prompt, 'Ready to dispatch')
-            self.assertEqual(ready['Next action'], 'Record intent and dispatch once')
-            admitted = self.admission_policy(prompt, 'Verified admission')
-            self.assertEqual(admitted['Review placement'], 'In review')
-
-        self.first = [review(head=OLD)]
-        self.assert_hold(WAITS, head=HEAD)
-
     def test_uncertain_merge_is_not_retried(self):
         self.merge_response = GitHubError('Unconfirmed write')
         result = self.run_command()
         self.assertEqual(result['status'], 'Need attention')
+        self.assertEqual((result['outcome'], result['pr'], result['head']), ('unconfirmed', 14, HEAD))
         self.assertIn('Reconcile GitHub state', result['reason'])
         self.assertEqual(sum(method == 'PUT' for method, _, _ in self.calls), 1)

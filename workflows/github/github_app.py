@@ -20,8 +20,10 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 if __package__:
     from .merge_reviewed import add_arguments, merge_reviewed
+    from .scheduler import plan, pr_facts
 else:
     from merge_reviewed import add_arguments, merge_reviewed
+    from scheduler import plan, pr_facts
 
 
 API = 'https://api.github.com'
@@ -284,6 +286,10 @@ def main(argv=None, *, config_path=None):
     commands = parser.add_subparsers(dest='action', required=True)
     commands.add_parser('status')
     add_arguments(commands.add_parser('merge-reviewed'))
+    commands.add_parser('pr-facts').add_argument('--pr', required=True, type=int)
+    scheduling = commands.add_parser('schedule')
+    scheduling.add_argument('--implementer', required=True)
+    scheduling.add_argument('--reviewer', required=True)
     for name in ('gh', 'git'):
         commands.add_parser(name).add_argument('native_args', nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
@@ -296,6 +302,17 @@ def main(argv=None, *, config_path=None):
             return 0
         if args.action == 'merge-reviewed':
             print(json.dumps(merge_reviewed(installation, args)))
+            return 0
+        if args.action == 'pr-facts':
+            print(json.dumps(pr_facts(installation, args.pr)))
+            return 0
+        if args.action == 'schedule':
+            try:
+                decision = plan(json.load(sys.stdin), implementer=args.implementer, reviewer=args.reviewer)
+            except (AttributeError, KeyError, TypeError, ValueError):
+                print('Scheduler input is invalid. Check the GitHub workflow scheduler input fields.', file=sys.stderr)
+                return 1
+            print(json.dumps(decision, ensure_ascii=False))
             return 0
         with TemporaryDirectory(prefix='project-manager-app-') as home:
             env = cli_environment(home)
