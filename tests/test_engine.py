@@ -29,7 +29,6 @@ class Dependencies:
         self.recoveries = 0
         self.closes = []
         self.provision_error = self.run_error = self.status_error = None
-        self.close_hold = None
         self.rename_errors = {}
         self.turn_results = {}
         self.admitted_thread = 'thread'
@@ -53,9 +52,6 @@ class Dependencies:
         if operation == 'close':
             assert args == ('--pane', self.worker['pane_id'], '--defer-locked')
             self.closes.append(args[1])
-            if self.close_hold:
-                self.worker['pending_closure'] = True
-                return dict(pane_id=args[1], closed=False, status_code='close_deferred', reason=self.close_hold)
             self.rows.remove(self.worker)
             return dict(pane_id=args[1], closed=True)
         raise AssertionError(operation)
@@ -198,7 +194,7 @@ class Contract(unittest.TestCase):
         self.assertEqual(self.engine.execute('run', name='worker', parameters={'TASK': 'test'})['pane_id'], 'w1:p2')
         self.assertEqual(self.native.worker['status'], 'I:RUN')
 
-    def test_partial_provision_reports_no_submission_and_releases_verified_empty_pane(self):
+    def test_partial_provision_reports_no_submission_and_defers_cleanup(self):
         self.native.provision_error = Hold('partial_provision', 'Codex TUI attachment was not verified', pane_id='w1:p2')
         self.native.worker['agent_status'] = 'blocked'
         self.native.worker['creation_pending'] = True
@@ -215,8 +211,12 @@ class Contract(unittest.TestCase):
         self.assertEqual(capacity['occupied'], ['w1:p2'])
         self.assertEqual(capacity['unresolved_launches'][0]['admission'], 'not_attempted')
         self.assertEqual(self.native.closes, [])
-        self.assertEqual(self.engine.execute('prepare_panes')['holds'], [])
-        self.assertEqual(self.native.closes, ['w1:p2'])
+        hold = self.engine.execute('prepare_panes')['holds'][0]['error']
+        self.assertEqual((hold['reason'], hold['dependency']),
+                         ('turn_guard_unavailable', 'hermes-herdr-agent-manager'))
+        self.assertEqual(self.native.closes, [])
+        self.assertEqual(self.engine.execute('capacity')['available'], 0)
+        self.native.rows.remove(self.native.worker)
         self.assertEqual(self.engine.execute('capacity')['available'], 1)
 
     def test_provision_timeout_can_be_discovered_and_cleanup_waits_for_lock_and_binding(self):
@@ -234,23 +234,44 @@ class Contract(unittest.TestCase):
         self.assertEqual(self.engine.execute('prepare_panes')['holds'][0]['pane_id'], 'w1:p2')
         self.assertEqual(self.native.closes, [])
         self.native.status_error = None
-        self.native.close_hold = 'tab_user_locked'
+        self.native.worker['pending_closure'] = True
         result = self.engine.execute('prepare_panes')
         self.assertEqual(result['holds'][0]['error']['status_code'], 'close_deferred')
+        self.assertEqual(self.engine.execute('close', pane_id='w1:p2')['reason'], 'turn_guard_unavailable')
+        self.assertEqual(self.native.closes, [])
         self.assertEqual(self.engine.execute('capacity')['available'], 0)
-        self.native.close_hold = None
-        self.engine.execute('prepare_panes')
+        self.native.rows.remove(self.native.worker)
         self.assertEqual(self.engine.execute('capacity')['available'], 1)
         self.assertEqual(self.native.runs, 0)
 
-    def test_definitive_refusal_cleans_up_with_the_guarded_close(self):
+    def test_refusal_cleanup_leaves_an_operator_turn_starting_after_the_idle_read(self):
         self.native.run_error = Hold('quota_account_changed', 'Account changed before turn admission')
         with self.assertRaises(Hold) as error:
             self.engine.execute('run', name='worker', parameters={'TASK': 'test'})
         self.assertEqual(error.exception.code, 'quota_account_changed')
         self.assertEqual(error.exception.details['admission'], 'not_attempted')
-        self.assertEqual(self.native.closes, ['w1:p2'])
-        self.assertEqual(self.engine.execute('capacity')['available'], 1)
+        cleanup = error.exception.details['cleanup']
+        self.assertEqual((cleanup['closed'], cleanup['reason'], cleanup['dependency']),
+                         (False, 'turn_guard_unavailable', 'hermes-herdr-agent-manager'))
+        self.assertEqual(self.native.closes, [])
+
+        agent = self.native.agent
+
+        def admit_operator_after_snapshot(operation, *args, **kwargs):
+            reply = agent(operation, *args, **kwargs)
+            if operation == 'status':
+                self.native.result.update(state='working', active=True)
+            return reply
+
+        with patch.object(self.native, 'agent', side_effect=admit_operator_after_snapshot):
+            holds = self.engine.execute('prepare_panes')['holds']
+        self.assertEqual(holds[0]['error']['reason'], 'turn_guard_unavailable')
+        self.assertEqual(self.native.result['state'], 'working')
+        self.assertIn(self.native.worker, self.native.rows)
+        self.assertEqual(self.native.worker['status'], 'I:START')
+        self.assertEqual(self.native.closes, [])
+        self.assertEqual(self.engine.execute('prepare_panes')['holds'][0]['error']['code'], 'worker_unavailable')
+        self.assertEqual(self.engine.execute('capacity')['available'], 0)
 
     def test_codex_refusal_and_prewrite_deadline_allow_retry_after_restart(self):
         for index, code in enumerate(('codex_rejected', 'deadline_elapsed'), 2):
@@ -259,19 +280,18 @@ class Contract(unittest.TestCase):
                 pane = f'w1:p{index}'
                 native.worker.update(pane_id=pane, terminal_id=f't{index}')
                 native.run_error = Hold(code, 'Definitive refusal from the receiver')
-                if code == 'deadline_elapsed':
-                    native.close_hold = 'tab_user_locked'
                 request = dict(name='worker', parameters={'TASK': code})
                 with self.assertRaises(Hold) as error:
                     Engine(self.home, native).execute('run', **request)
                 self.assertEqual(error.exception.code, code)
                 self.assertEqual(error.exception.details['admission'], 'not_attempted')
-                self.assertEqual(native.closes, [pane])
-                if native.close_hold:
-                    self.assertEqual(error.exception.details['pane_id'], pane)
-                    self.assertEqual(Engine(self.home, native).execute('capacity')['available'], 0)
-                    native.rows.remove(native.worker)
-                    native.worker.pop('pending_closure')
+                self.assertEqual(error.exception.details['pane_id'], pane)
+                self.assertEqual(native.closes, [])
+                with self.assertRaises(Hold) as held:
+                    Engine(self.home, native).execute('run', **request)
+                self.assertEqual(held.exception.code, 'capacity')
+                self.assertEqual(native.runs, 1)
+                native.rows.remove(native.worker)
                 native.run_error = None
                 engine = Engine(self.home, native)
                 self.assertEqual(engine.execute('capacity')['available'], 1)
@@ -296,19 +316,38 @@ class Contract(unittest.TestCase):
                     Engine(self.home, native).execute('run', **request)
                 self.assertEqual(native.runs, 1)
 
-    def test_lost_reply_delivers_blocked_turn_only_with_matching_run_metadata(self):
+    def test_lost_reply_holds_ambiguous_attention_until_managed_turn_is_observed(self):
         self.native.run_error = Hold('transport_error', 'Run receipt was lost')
         with self.assertRaisesRegex(Hold, 'Run receipt was lost'):
             self.engine.execute('run', name='worker', parameters={'TASK': 'test'})
-        self.native.result.update(state='blocked', turn_id='turn', active=True, attention=dict(
-            attention_id='ask', state='blocked', reason='approval', observed_at='2026-11-26T07:00:00Z'))
-        native_result = dict(thread_id='thread', turn_id='turn', state='working')
-        for proof in (native_result, dict(native_result, parameters={'TASK': 'different', 'PR': 'none'}),
-                      dict(native_result, thread_id='other', parameters={'TASK': 'test', 'PR': 'none'})):
-            self.native.turn_results['turn'] = proof
-            self.assertEqual(self.engine.execute('tick')['action'], 'capacity_held')
+        attention = dict(attention_id='ask', state='blocked', reason='item/commandExecution/requestApproval',
+                         observed_at='2026-11-26T07:00:00Z')
+        self.native.result.pop('completed_at')
+        for turn in ('operator-turn', 'turn'):
+            with self.subTest(turn=turn):
+                # The installed receiver returns this same shape for either origin.
+                self.native.result.update(state='blocked', turn_id=turn, active=True, attention=attention)
+                self.native.turn_results[turn] = dict(thread_id='thread', turn_id=turn, state='working')
+                engine = Engine(self.home, self.native)
+                row = engine.execute('query', pane_id='w1:p2')
+                self.assertEqual((row['admission'], row['state'], row['delivery']), ('unknown', 'unknown', 'unknown'))
+                self.assertEqual((row['reason']['code'], row['reason']['dependency']),
+                                 ('managed_turn_identity_unavailable', 'hermes-herdr-agent-manager'))
+                self.assertNotIn('turn_id', row)
+                self.assertNotIn('attention', row)
+                self.assertEqual(engine.execute('tick')['action'], 'capacity_held')
+                with self.assertRaisesRegex(Hold, 'already has an unverified submission'):
+                    engine.execute('run', name='worker', parameters={'TASK': 'test'})
         self.assertEqual(self.native.submissions, [])
-        self.native.turn_results['turn'] = dict(native_result, parameters={'PR': 'none', 'TASK': 'test'})
+
+        # Outside attention status the receiver's turn ID comes from its managed admission.
+        self.native.result.update(state='working')
+        self.native.result.pop('attention')
+        self.assertEqual(self.engine.execute('query', pane_id='w1:p2')['admitted_turn_id'], 'turn')
+        self.native.result.update(state='blocked', turn_id='operator-turn', attention=attention)
+        self.assertEqual(self.engine.execute('tick')['action'], 'capacity_held')
+        self.assertEqual(self.native.submissions, [])
+        self.native.result.update(turn_id='turn')
         event = self.engine.execute('tick')
         self.assertEqual((event['event'], event['turn_id'], event['attention_id']), ('worker_attention', 'turn', 'ask'))
         self.assertEqual(self.native.worker['status'], 'I:WAIT:ask')
@@ -345,16 +384,22 @@ class Contract(unittest.TestCase):
         self.assertEqual(self.native.runs, 1)
         self.assertEqual(self.native.closes, [])
 
-    def test_working_observation_preserves_admission_for_later_approval(self):
+    def test_suspended_snapshot_can_reconcile_verified_managed_completion(self):
         self.native.run_error = Hold('transport_error', 'Run receipt was lost')
         with self.assertRaises(Hold):
             self.engine.execute('run', name='worker', parameters={'TASK': 'test'})
-        self.native.result.update(state='working', turn_id='turn', active=True)
+        self.native.result.update(state='suspended', turn_id='turn', active=False)
+        result = dict(thread_id='thread', turn_id='turn', state='done', outcome='completed',
+                      message='finished', completed_at=None, parameters={})
+        parameters = {'TASK': 'test', 'PR': 'none'}
+        for evidence in (result, dict(result, parameters=dict(parameters, TASK='different')),
+                         dict(result, thread_id='other', parameters=parameters)):
+            self.native.turn_results['turn'] = evidence
+            self.assertEqual(self.engine.execute('query', pane_id='w1:p2')['admission'], 'unknown')
+        self.native.turn_results['turn'] = dict(result, parameters=parameters)
         self.assertEqual(self.engine.execute('query', pane_id='w1:p2')['admitted_turn_id'], 'turn')
-        self.native.result.update(state='blocked', attention=dict(
-            attention_id='ask', state='blocked', reason='approval', observed_at='2026-11-26T07:00:00Z'))
-        restarted = Engine(self.home, self.native)
-        self.assertEqual(restarted.execute('tick')['event'], 'worker_attention')
+        self.native.result.update(state='done')
+        self.assertEqual(Engine(self.home, self.native).execute('tick')['event'], 'worker_result')
         self.assertEqual(self.native.runs, 1)
 
     def test_lost_admission_is_held_until_the_original_thread_identifies_the_turn(self):

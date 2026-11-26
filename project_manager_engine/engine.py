@@ -251,12 +251,19 @@ class Engine:
                 if turn is not None and observed == turn and row['state'] in ('working', 'done', 'blocked', 'suspended'):
                     row.update(admission='accepted', admitted_turn_id=turn)
                     return
-                reason = (Hold('turn_unverified', 'The admitted turn is not verified in the current worker status') if turn else
-                          Hold('outcome_unknown', 'The initial prompt admission is unverified'))
+                if turn is not None:
+                    reason = Hold('turn_unverified', 'The admitted turn is not verified in the current worker status')
+                elif row['state'] in ('blocked', 'suspended'):
+                    reason = Hold('managed_turn_identity_unavailable',
+                                  'The agent-manager receiver must identify the managed turn separately from '
+                                  'operator attention or expose managed-run metadata for the exact active turn',
+                                  dependency='hermes-herdr-agent-manager')
+                else:
+                    reason = Hold('outcome_unknown', 'The initial prompt admission is unverified')
             row.update(admission='accepted' if turn else 'unknown', state='unknown', delivery='unknown')
             if turn is not None:
                 row['admitted_turn_id'] = turn
-                row.pop('turn_id', None)
+            row.pop('turn_id', None)
             row.pop('attention', None)
             row.setdefault('reason', reason.as_dict())
         elif mark == 'START':
@@ -279,15 +286,15 @@ class Engine:
             return True
         if row['state'] not in ('blocked', 'suspended') or not launch.get('parameters_fingerprint'):
             return False
-        # Attention status can carry an operator turn. Require matching run metadata
-        # from the result of the exact turn before adopting its attention.
+        # Attention status can carry an operator turn. Bridge.result omits metadata
+        # while active, but the exact turn may have completed since the status read.
         try:
             result = self.agent('result', row['pane_id'], '--turn-id', row['turn_id'])
         except Hold:
             return False
         parameters = result.get('parameters')
         return (result.get('thread_id') == launch['thread_id'] and result.get('turn_id') == row['turn_id']
-                and result.get('state') in ('working', 'blocked', 'suspended', 'done')
+                and result.get('state') == 'done'
                 and isinstance(parameters, dict) and bool(parameters)
                 and fingerprint(parameters) == launch['parameters_fingerprint'])
 
@@ -474,12 +481,8 @@ class Engine:
         except Hold as exc:
             if exc.code in RUN_REFUSALS:
                 self.forget_launch(pending)
-                try:
-                    cleanup = self.close(pane)
-                except Hold:
-                    cleanup = {}
-                details = {} if cleanup.get('closed') is True else {'pane_id': pane}
-                raise Hold(exc.code, str(exc), **details, admission='not_attempted', phase='submission') from exc
+                raise Hold(exc.code, str(exc), pane_id=pane, admission='not_attempted', phase='submission',
+                           cleanup=self.defer_unused_close(pane)) from exc
             raise Hold('outcome_unknown', str(exc), pane_id=pane, thread_id=thread,
                        workspace_id=self.workspace_id, admission='unknown', phase='submission', cause=exc.code) from exc
         try:
@@ -577,13 +580,23 @@ class Engine:
                        pane_id=pane_id, admission='unknown')
         if row.get('admission') == 'not_attempted':
             self.check_unused_pane(row)
-        elif (row.get('native_state', row['state']) not in ('idle', 'done')
-              or not identifier(row.get('thread_id'))):
+            return self.defer_unused_close(pane_id)
+        if (row.get('native_state', row['state']) not in ('idle', 'done')
+                or not identifier(row.get('thread_id'))):
             raise Hold('not_idle', 'Wait for the worker turn to finish before closing its pane')
         launch = self.pane_launch(pane_id)
         if launch is not None and row['lock'] == 'unlocked':
             self.finish_launch(launch, row)
         return self.native.pane('close', '--pane', pane_id, '--defer-locked', workspace=self.workspace_id)
+
+    @staticmethod
+    def defer_unused_close(pane_id):
+        # The pane guard checks identity and zoom. Only the receiver can hold
+        # its shared operator/automation admission lock through a close.
+        return dict(pane_id=pane_id, closed=False, status_code='close_deferred', reason='turn_guard_unavailable',
+                    dependency='hermes-herdr-agent-manager',
+                    message='Closing an unused worker pane requires a receiver operation that verifies '
+                            'turn state and holds its admission lock through the guarded pane close')
 
     @staticmethod
     def check_unused_pane(row):
@@ -636,9 +649,8 @@ class Engine:
                     self.agent('recover', pane)
                     continue
                 if row.get('admission') == 'not_attempted':
-                    receipt = self.close(pane)
-                    if receipt.get('closed') is not True:
-                        holds.append(dict(pane_id=pane, error=receipt))
+                    self.check_unused_pane(row)
+                    holds.append(dict(pane_id=pane, error=self.defer_unused_close(pane)))
                     continue
                 if row.get('admission') == 'unknown':
                     holds.append(dict(pane_id=pane, error=row['reason']))
