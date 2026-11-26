@@ -31,6 +31,7 @@ PR = '/repos/owner/repository/pulls/14'
 PERMISSION = '/repos/owner/repository/collaborators/reviewer/permission'
 RULES = '/repos/owner/repository/rules/branches/main?per_page=100&page=1'
 REVIEWS = PR + '/reviews?per_page=100&page=1'
+NEXT_REVIEWS = PR + '/reviews?per_page=100&page=2'
 REVIEWER = {'login': 'reviewer', 'id': 2, 'type': 'User'}
 AUTHOR = {'login': 'author', 'id': 1, 'type': 'User'}
 
@@ -73,6 +74,7 @@ class GitHubWorkflowPrompt(unittest.TestCase):
                              rebaseMergeAllowed=False, pullRequest=self.pull)
         self.first = [review()]
         self.final = None
+        self.incomplete_read = None
         self.rules = []
         self.permission = dict(permission='write', user=REVIEWER)
         self.on_permission = lambda: None
@@ -106,7 +108,11 @@ class GitHubWorkflowPrompt(unittest.TestCase):
             evidence = self.first if self.review_reads == 1 or self.final is None else self.final
             if isinstance(evidence, Exception):
                 raise evidence
-            return evidence, ''
+            links = f'<https://api.github.com{NEXT_REVIEWS}>; rel="next"' if (
+                self.review_reads == self.incomplete_read) else ''
+            return evidence, links
+        if path == NEXT_REVIEWS and method == 'GET':
+            return [], ''
         if path == PERMISSION and method == 'GET':
             self.on_permission()
             return self.permission, ''
@@ -233,6 +239,18 @@ class GitHubWorkflowPrompt(unittest.TestCase):
                 self.first, self.final = [review()], [review(), dismissal]
                 self.assert_hold(WAITS)
                 self.assertEqual(self.review_reads, 2)
+
+    def test_empty_continuation_blocks_initial_review_history(self):
+        self.incomplete_read = 1
+        self.assert_hold(WAITS)
+        self.assertEqual(self.review_reads, 1)
+        self.assertEqual(self.calls[-1][:2], ('GET', NEXT_REVIEWS))
+
+    def test_empty_continuation_blocks_final_review_history(self):
+        self.incomplete_read = 2
+        self.assert_hold(WAITS)
+        self.assertEqual(self.review_reads, 2)
+        self.assertEqual(self.calls[-1][:2], ('GET', NEXT_REVIEWS))
 
     def test_changed_head_requires_a_new_worker_review(self):
         self.assert_hold('Head changed', head=OLD)

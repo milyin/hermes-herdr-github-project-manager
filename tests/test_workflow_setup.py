@@ -1,6 +1,7 @@
 import importlib.util
 import json
 from contextlib import ExitStack, nullcontext
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -39,7 +40,7 @@ class BundledWorkflows(unittest.TestCase):
             for agent in (config['manager'], *config['workers']):
                 agent['working_directory'] = str(self.home)
 
-    def test_github_example_renders_scoped_commands_for_all_roles(self):
+    def github_prompts(self):
         self.github['manager']['parameters']['github_identity'] = APP
         self.github['manager']['parameters']['REPO'] = REPO
         settings = Settings.read(self.home, self.github)
@@ -48,6 +49,10 @@ class BundledWorkflows(unittest.TestCase):
             {'github_identity': APP, 'REPO': REPO, 'TASK': 'Implement the issue'})
         reviewer, _ = settings.workers['reviewer'].prompt.render(
             {'github_identity': APP, 'REPO': REPO, 'ISSUE': '6', 'PR': '7', 'HEAD': 'a' * 40})
+        return manager, implementer, reviewer
+
+    def test_github_example_renders_scoped_commands_for_all_roles(self):
+        manager, implementer, reviewer = self.github_prompts()
         for prompt in (manager, implementer, reviewer):
             for action in ('status', 'gh', 'git'):
                 self.assertIn(f'{APP} --repo {REPO} {action}', prompt)
@@ -55,6 +60,38 @@ class BundledWorkflows(unittest.TestCase):
             self.assertIn('Do not use personal accounts', prompt)
         self.assertIn(f'Pass `github_identity` as `{APP}` to both workers', manager)
         self.assertIn('`permissions.contents` is `write`', manager)
+
+    def test_legacy_profiles_check_launcher_capability_before_status(self):
+        for role in (self.github['manager'], *self.github['workers']):
+            role['prompt_file'] = role['prompt_file'].replace('workflows/github/', 'doc/')
+        launcher = self.home / APP
+        launcher.write_text('''#!/bin/sh
+case "$*" in
+    "--repo owner/repository merge-reviewed --help")
+        case "$FIXTURE_LAUNCHER" in
+            legacy) exit 2 ;;
+            generic-help) printf '%s\\n' 'usage: example-app --repo REPO status' ;;
+            checked-merge) printf '%s\\n' 'usage: example-app merge-reviewed --reviewed-head SHA' ;;
+        esac ;;
+    "--repo owner/repository status") printf '%s\\n' 'fixture status' ;;
+    *) exit 99 ;;
+esac
+''')
+        launcher.chmod(0o700)
+        for role, prompt in zip(('manager', 'implementer', 'reviewer'), self.github_prompts()):
+            preflight = re.search(r'```sh\n(.*?)\n```', prompt, re.DOTALL)
+            self.assertIsNotNone(preflight, role)
+            for capability in ('legacy', 'generic-help', 'checked-merge'):
+                with self.subTest(role=role, capability=capability):
+                    result = subprocess.run(['sh', '-c', preflight[1]], cwd=self.home, capture_output=True,
+                                            text=True, env={'PATH': f'{self.home}{os.pathsep}{os.defpath}',
+                                                           'FIXTURE_LAUNCHER': capability})
+                    if capability == 'checked-merge':
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(result.stdout, 'fixture status\n')
+                    else:
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertEqual(result.stdout, '')
 
     def test_demo_example_renders_without_github_configuration(self):
         settings = Settings.read(self.home, self.demo)

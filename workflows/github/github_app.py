@@ -150,11 +150,12 @@ class Installation:
             data, links = request('GET', f'{path}?per_page=100&page={page}', self.token)
             if not isinstance(data, list):
                 raise GitHubError('GitHub returned an invalid list')
-            yield from data
-            if not re.search(r';\s*rel="next"', links):
-                return
-            if not data:
+            has_next = re.search(r';\s*rel="next"', links) is not None
+            if not data and (page > 1 or has_next):
                 raise GitHubError('GitHub returned an incomplete list')
+            yield from data
+            if not has_next:
+                return
             page += 1
 
     def graphql(self, query, variables):

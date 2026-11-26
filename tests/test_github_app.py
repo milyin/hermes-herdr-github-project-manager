@@ -83,7 +83,7 @@ class AppLauncher(unittest.TestCase):
     def test_installed_symlink_resolves_workflow_module(self):
         launcher = self.home / APP
         launcher.symlink_to(ROOT / 'workflows' / 'github' / 'github_app.py')
-        env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1')
+        env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1', XDG_CONFIG_HOME=str(self.home))
         result = subprocess.run([str(launcher), '--repo', REPO, 'merge-reviewed', '--help'], env=env,
                                 capture_output=True, text=True, check=True)
         self.assertIn('--reviewed-head', result.stdout)
@@ -152,3 +152,9 @@ class AppLauncher(unittest.TestCase):
         with patch('workflows.github.github_app.request', side_effect=GitHubError('Unavailable')):
             with self.assertRaises(GitHubError):
                 list(installation.pages('pulls/9/reviews'))
+
+    def test_pages_accepts_an_empty_first_page_without_a_next_link(self):
+        installation = Installation(REPO, APP + '[bot]', 777, 'fixture-token', {}, '')
+        with patch('workflows.github.github_app.request', return_value=([], '')) as http:
+            self.assertEqual(list(installation.pages('pulls/9/reviews')), [])
+        http.assert_called_once_with('GET', f'/repos/{REPO}/pulls/9/reviews?per_page=100&page=1', 'fixture-token')

@@ -15,7 +15,7 @@ The manager tracks opted-in issues, delegates implementation and review, and pub
    ln -s "$workflow/github_app.py" "$HOME/.local/bin/$app_slug"
    ```
 
-   If a command already uses that slug, arrange for the workflow environments to resolve the bundled launcher. Verify that the selected command offers `merge-reviewed --help`.
+   If a command already uses that slug, see [Upgrade a legacy launcher](#upgrade-a-legacy-launcher).
 4. [Generate a private key](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/managing-private-keys-for-github-apps). Save the key and a JSON configuration outside the skill, in a directory accessible to the operator's workflow environments. Both files must be regular files owned by the running user with permission `0600`. The default configuration is `$XDG_CONFIG_HOME/herdr-project-manager/github/APP_SLUG.json`, or `~/.config/herdr-project-manager/github/APP_SLUG.json`. Use the App ID shown in GitHub's App settings.
 
    ```json
@@ -27,11 +27,12 @@ The manager tracks opted-in issues, delegates implementation and review, and pub
    }
    ```
 
-5. Run the following in the manager and both workers' execution environments with the selected slug and repository. Require `authenticated: true`, the expected `APP_SLUG[bot]` actor and repository, and the required permissions from step 2. A missing launcher, mismatched identity or repository, or failed preflight blocks setup. Keep credentials out of profiles, prompts, transcripts, and Git remotes.
+5. Run the following in the manager and both workers' execution environments with the selected slug and repository. The help check verifies launcher support for SHA-pinned `merge-reviewed` before `status` authenticates. Require `authenticated: true`, the expected `APP_SLUG[bot]` actor and repository, and the required permissions from step 2. A missing launcher, mismatched identity or repository, or failed preflight blocks setup. Keep credentials out of profiles, prompts, transcripts, and Git remotes.
 
-   ```bash
-   APP_SLUG --repo OWNER/REPO status
-   APP_SLUG --repo OWNER/REPO merge-reviewed --help
+   ```sh
+   merge_help=$(APP_SLUG --repo OWNER/REPO merge-reviewed --help) &&
+     printf '%s\n' "$merge_help" | grep -Fq -- '--reviewed-head' &&
+     APP_SLUG --repo OWNER/REPO status
    ```
 
 6. Confirm the repository wiki is available, enabled, and initialized with a first page. A private repository needs a plan that includes wikis. Verify wiki read access and verify `permissions.contents: write` in the status result. [GitHub wiki availability](https://docs.github.com/en/communities/documenting-your-project-with-wikis)
@@ -47,6 +48,12 @@ The manager tracks opted-in issues, delegates implementation and review, and pub
    ```
 
 8. Fill in the [profile settings](#profile-settings), save the operator-confirmed profile, and run `/project-manager`. With the operator, verify the workflow on an opted-in issue.
+
+## Upgrade a legacy launcher
+
+Profiles that use the legacy `doc/` prompt paths load the current workflow prompts through compatibility symlinks. These profiles can open without a setup interview, so the manager and workers run the same preflight as step 5 before Git or GitHub operations. A launcher that supports `status` alone fails the capability check and blocks workflow operations until upgraded.
+
+Install the bundled launcher under the same App slug as in step 3. Point the existing symlink at the bundled `github_app.py` or place the new symlink in a trusted directory earlier on the workflow's `PATH`. Provide the JSON file from step 4 using the existing App ID, repository and private key. Keep the `github_identity` parameter set to the App slug. Reopen the affected sessions if their `PATH` changed, then rerun step 5 in the manager and both worker environments before resuming workflow operations.
 
 ## Using the launcher
 
