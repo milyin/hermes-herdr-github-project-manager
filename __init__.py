@@ -32,6 +32,7 @@ def register(ctx):
     home = get_hermes_home().resolve()
     setup_guard = threading.Lock()
     seen = set()
+    uncertain_interviews = set()
 
     def active():
         return get_hermes_home().resolve() == home and raw_settings(home).get('enabled') is True
@@ -112,7 +113,7 @@ def register(ctx):
             return
         if not setup_guard.acquire(blocking=False):
             return
-        if session_id in seen:
+        if session_id in seen or session_id in uncertain_interviews:
             setup_guard.release()
             return
 
@@ -134,12 +135,21 @@ def register(ctx):
                         'Ask the operator to run /project-manager to finish setup. '
                         f'First validation error (data): {exc}'
                     )
-                    with profile_context(home), suppress(Hold):
-                        Native(home).gateway('submit', session_id, message)
+                    try:
+                        with profile_context(home):
+                            Native(home).gateway('submit', session_id, message)
+                    except Hold as admission:
+                        if admission.code == 'outcome_unknown':
+                            # Hermes may already have admitted the interview to this conversation.
+                            uncertain_interviews.add(session_id)
+                        LOG.warning('Project manager interview held: %s (%s)', admission, admission.code)
+                    else:
+                        seen.add(session_id)
             except (OSError, RuntimeError, ValueError):
                 LOG.exception('Project manager startup failed')
-            finally:
+            else:
                 seen.add(session_id)
+            finally:
                 setup_guard.release()
 
         threading.Thread(target=background, name='herdr-project-manager-setup', daemon=True).start()

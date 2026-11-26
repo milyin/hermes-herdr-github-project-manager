@@ -1,6 +1,6 @@
 import importlib.util
 import json
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from pathlib import Path
 import re
 import subprocess
@@ -52,6 +52,7 @@ class BundledWorkflows(unittest.TestCase):
             self.assertIn(f'{APP}[bot]', prompt)
             self.assertIn('Do not use personal accounts', prompt)
         self.assertIn(f'Pass `github_identity` as `{APP}` to both workers', manager)
+        self.assertIn('`permissions.contents` is `write`', manager)
 
     def test_demo_example_renders_without_github_configuration(self):
         settings = Settings.read(self.home, self.demo)
@@ -62,35 +63,70 @@ class BundledWorkflows(unittest.TestCase):
         self.assertEqual(params, {})
         self.assertIn('Hello from the project-manager demo!', worker)
 
-    def test_startup_submits_interview_to_operator_once(self):
+
+class StartupInterview(unittest.TestCase):
+    def setUp(self):
+        temp = TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.home = Path(temp.name)
         spec = importlib.util.spec_from_file_location('project_manager_plugin_fixture', ROOT / '__init__.py',
                                                       submodule_search_locations=[str(ROOT)])
-        plugin = importlib.util.module_from_spec(spec)
-        with patch.dict(sys.modules, {spec.name: plugin,
-                                     'hermes_constants': SimpleNamespace(get_hermes_home=lambda: self.home)}):
-            spec.loader.exec_module(plugin)
-            ctx = Mock()
-            with (patch.object(plugin, 'raw_settings', return_value={'enabled': True}),
-                  patch.object(plugin, 'profile_context', side_effect=nullcontext),
-                  patch.object(plugin, 'setup', side_effect=plugin.Hold('invalid_config', 'manager is required')),
-                  patch.object(plugin, 'Native') as native,
-                  patch.object(plugin.threading, 'Thread', side_effect=lambda target, **_: Mock(start=target)),
-                  self.assertLogs(plugin.LOG, level='WARNING')):
-                native.return_value.binding = {'session_id': 'bound'}
-                plugin.register(ctx)
-                hooks = dict(call.args for call in ctx.register_hook.call_args_list)
-                hooks['on_session_open']('bound', 'tui')
-                hooks['on_session_open']('operator', 'tui')
-                hooks['on_session_start']('operator', 'tui')
+        plugin = self.plugin = importlib.util.module_from_spec(spec)
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(patch.dict(sys.modules, {spec.name: plugin,
+                            'hermes_constants': SimpleNamespace(get_hermes_home=lambda: self.home)}))
+        spec.loader.exec_module(plugin)
+        stack.enter_context(patch.object(plugin, 'raw_settings', return_value={'enabled': True}))
+        stack.enter_context(patch.object(plugin, 'profile_context', side_effect=nullcontext))
+        stack.enter_context(patch.object(plugin, 'setup', side_effect=plugin.Hold('invalid_config', 'manager is required')))
+        native = stack.enter_context(patch.object(plugin, 'Native'))
+        stack.enter_context(patch.object(plugin.threading, 'Thread', side_effect=lambda target, **_: Mock(start=target)))
+        self.logs = stack.enter_context(self.assertLogs(plugin.LOG, level='WARNING'))
+        native.return_value.binding = {'session_id': 'bound'}
+        self.gateway = native.return_value.gateway
+        self.gateway.return_value = {'admission_id': 'admitted'}
+        ctx = Mock()
+        plugin.register(ctx)
+        self.hooks = dict(call.args for call in ctx.register_hook.call_args_list)
 
-            gateway = native.return_value.gateway
-            gateway.assert_called_once()
-            operation, session, message = gateway.call_args.args
-            self.assertEqual((operation, session), ('submit', 'operator'))
-            self.assertIn(str(ROOT / 'doc' / 'PROFILE.md'), message)
-            self.assertIn(str(self.home / 'config.yaml'), message)
-            self.assertIn('Start with the workflow choice', message)
-            self.assertIn('GitHub App setup link', message)
+    def test_startup_submits_interview_to_operator_once(self):
+        self.hooks['on_session_open']('bound', 'tui')
+        self.hooks['on_session_open']('operator', 'tui')
+        self.hooks['on_session_start']('operator', 'tui')
+
+        self.gateway.assert_called_once()
+        operation, session, message = self.gateway.call_args.args
+        self.assertEqual((operation, session), ('submit', 'operator'))
+        self.assertIn(str(ROOT / 'doc' / 'PROFILE.md'), message)
+        self.assertIn(str(self.home / 'config.yaml'), message)
+        self.assertIn('Start with the workflow choice', message)
+        self.assertIn('GitHub App setup link', message)
+
+    def test_startup_retries_definite_gateway_rejection(self):
+        rejection = self.plugin.Hold('gateway_unavailable', 'Hermes gateway is starting')
+        self.gateway.side_effect = [rejection, self.gateway.return_value]
+        self.hooks['on_session_open']('operator', 'tui')
+        self.gateway.assert_called_once()
+        self.hooks['on_session_start']('operator', 'tui')
+        self.hooks['on_session_open']('operator', 'tui')
+
+        self.assertEqual(self.gateway.call_count, 2)
+        self.assertEqual(self.gateway.call_args_list[0], self.gateway.call_args_list[1])
+        self.assertIn('gateway_unavailable', '\n'.join(self.logs.output))
+
+    def test_startup_holds_duplicate_after_uncertain_admission(self):
+        uncertain = self.plugin.Hold('outcome_unknown', 'Hermes did not confirm the exact admission')
+        self.gateway.side_effect = [uncertain, self.gateway.return_value]
+        self.hooks['on_session_open']('operator', 'tui')
+        self.hooks['on_session_start']('operator', 'tui')
+        self.hooks['on_session_open']('operator', 'tui')
+
+        self.gateway.assert_called_once()
+        self.assertIn('outcome_unknown', '\n'.join(self.logs.output))
+        self.hooks['on_session_open']('another-operator', 'tui')
+        self.assertEqual(self.gateway.call_count, 2)
+        self.assertEqual(self.gateway.call_args.args[:2], ('submit', 'another-operator'))
 
 
 class OptInLabel(unittest.TestCase):
@@ -104,8 +140,8 @@ class OptInLabel(unittest.TestCase):
         run = patch('scripts.ensure_github_label.subprocess.run')
         self.run = run.start()
         self.addCleanup(run.stop)
-        self.status = SimpleNamespace(stdout=json.dumps(
-            {'authenticated': True, 'actor': f'{APP}[bot]', 'repository': REPO}))
+        self.status = SimpleNamespace(stdout=json.dumps({'authenticated': True, 'actor': f'{APP}[bot]',
+                                                        'repository': REPO, 'permissions': {'contents': 'write'}}))
 
     def commands(self):
         return [call.args[0] for call in self.run.call_args_list]
@@ -126,6 +162,16 @@ class OptInLabel(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Cannot verify example-app'):
             ensure_label(REPO, APP, LABEL)
         self.assertEqual(self.commands(), [[*self.prefix, 'status']])
+
+    def test_setup_requires_contents_write_before_label_operations(self):
+        status = {'authenticated': True, 'actor': f'{APP}[bot]', 'repository': REPO}
+        for permissions in ({'contents': 'read', 'issues': 'write'}, {}):
+            with self.subTest(permissions=permissions):
+                self.run.reset_mock()
+                self.run.return_value = SimpleNamespace(stdout=json.dumps(dict(status, permissions=permissions)))
+                with self.assertRaisesRegex(ValueError, r'requires permissions\.contents: write'):
+                    ensure_label(REPO, APP, LABEL)
+                self.assertEqual(self.commands(), [[*self.prefix, 'status']])
 
     def test_failed_lookup_never_attempts_creation(self):
         self.run.side_effect = [self.status, subprocess.CalledProcessError(1, self.list_args)]

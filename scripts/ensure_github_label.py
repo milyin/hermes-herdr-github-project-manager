@@ -23,6 +23,9 @@ def ensure_label(repository, identity, label):
     if (not isinstance(status, dict) or status.get('authenticated') is not True
             or status.get('actor') != f'{identity}[bot]' or status.get('repository') != repository):
         raise ValueError(f'Cannot verify {identity}[bot] on {repository}')
+    permissions = status.get('permissions')
+    if not isinstance(permissions, dict) or permissions.get('contents') != 'write':
+        raise ValueError(f'Setup requires permissions.contents: write for {identity}[bot] on {repository}')
 
     endpoint = f'repos/{repository}/labels'
 
