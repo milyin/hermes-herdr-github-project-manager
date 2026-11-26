@@ -107,7 +107,18 @@ skills:
 
 ## Update an existing GitHub profile
 
-Install the proxy for the same App slug using the existing private JSON file and key. If the destination already contains a command with that slug, use a trusted directory earlier on the workflow's `PATH` and ensure the manager and workers resolve the new proxy.
+If the existing App JSON uses the legacy fields below, create a separate JSON file outside the skill. Use `umask 077` before creating it and keep it owned by the running user with mode `0600`. Populate it with these four fields.
+
+| Legacy field | Proxy field | Value |
+| --- | --- | --- |
+| `expected_slug` | `app_slug` | The same App slug |
+| `app_id` | `app_id` | The same GitHub App ID |
+| `default_repository` | `repository` | The same `OWNER/REPO` |
+| `key_path` | `private_key` | The absolute path to the existing private key file |
+
+Reuse the existing key in place. Put only its path in `private_key`, and keep the key file private and owned by the running user. If the old value starts with `~/`, expand it using the original user's home directory. Resolve a relative path from the working directory the legacy launcher used, and use the path to the regular key file if the old path is a symlink.
+
+Pass the new JSON's absolute path to `install_proxy.py --config` as shown in step 4. A JSON file that already uses the proxy fields can be passed directly. If the destination already contains a command with the same App slug, use a trusted directory earlier on the workflow's `PATH` and ensure the manager and workers resolve the new proxy.
 
 If any of the three `prompt_file` values still use `doc/`, replace only those values. These examples are relative to the profile directory. For absolute paths, keep the checkout prefix and replace the part after it.
 
