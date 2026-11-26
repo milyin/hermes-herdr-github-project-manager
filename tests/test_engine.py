@@ -148,11 +148,6 @@ class Contract(unittest.TestCase):
         self.config['workers'][0]['managed_work_root'] = str(root)
         self.native.manager['terminal_id'] = 't1'
         self.save()
-        proc = self.home / 'proc'
-        proc.mkdir()
-        process_view = patch('project_manager_engine.managed_work.PROC', proc)
-        process_view.start()
-        self.addCleanup(process_view.stop)
         return root
 
     def managed_run(self, **options):
@@ -165,7 +160,7 @@ class Contract(unittest.TestCase):
     def close_managed(self):
         return self.engine.execute('close', pane_id='w1:p2')['directory_cleanup']
 
-    def test_managed_cleanup_removes_only_the_recorded_assignment(self):
+    def test_managed_allocations_are_unique_and_caller_paths_stay_unrecorded(self):
         root = self.managed_root()
         caller = root / 'caller'
         caller.mkdir()
@@ -177,20 +172,21 @@ class Contract(unittest.TestCase):
         self.assertEqual(first.stat().st_mode & 0o777, 0o700)
         self.finish_managed()
         self.engine = Engine(self.home, self.native)
-        self.assertEqual(self.close_managed(), dict(path=str(first), status='removed'))
-        self.assertFalse(first.exists())
-        self.assertNotIn('managed_work', self.engine.execute('capacity'))
+        self.assertEqual(self.close_managed(),
+                         dict(path=str(first), status='retained', reason='cleanup_guard_unavailable'))
 
         second = Path(self.managed_run()['working_directory'])
         self.assertNotEqual(first, second)
         self.finish_managed()
-        self.assertEqual(self.close_managed()['status'], 'removed')
+        self.assertEqual(self.close_managed()['path'], str(second))
         for supplied in (caller, self.home / 'worker'):
             self.managed_run(working_directory=str(supplied))
             self.finish_managed()
             self.assertNotIn('directory_cleanup', self.engine.execute('close', pane_id='w1:p2'))
             self.assertTrue(supplied.is_dir())
-        self.assertEqual(set(root.iterdir()), {caller, unrecorded})
+        self.assertEqual(set(root.iterdir()), {caller, unrecorded, first, second})
+        records = self.engine.execute('capacity')['managed_work']
+        self.assertEqual({Path(record['path']) for record in records}, {first, second})
 
     def test_managed_cleanup_preserves_checkout_and_untracked_files(self):
         self.managed_root()
@@ -232,20 +228,20 @@ class Contract(unittest.TestCase):
         original = root / 'original'
         cwd.rename(original)
         cwd.symlink_to(outside, target_is_directory=True)
-        self.assertEqual(self.close_managed()['reason'], 'work_directory_changed')
+        self.assertEqual(self.close_managed()['status'], 'retained')
         self.assertTrue(cwd.is_symlink())
         self.assertTrue(outside.is_dir())
         self.assertTrue(original.is_dir())
         cwd.unlink()
         cwd.mkdir(mode=0o700)
-        self.assertEqual(self.close_managed()['reason'], 'work_directory_changed')
+        self.assertEqual(self.close_managed()['status'], 'retained')
         self.assertTrue(cwd.is_dir())
 
         retired = self.home / 'retired'
         root.rename(retired)
         root.mkdir(mode=0o700)
         cwd.mkdir(mode=0o700)
-        self.assertEqual(self.close_managed()['reason'], 'work_root_changed')
+        self.assertEqual(self.close_managed()['status'], 'retained')
         self.assertTrue(cwd.is_dir())
         self.assertTrue((retired / cwd.name).is_dir())
 
@@ -262,7 +258,7 @@ class Contract(unittest.TestCase):
                 self.engine.execute('prepare_panes')
                 records = self.engine.execute('capacity')['managed_work']
                 self.assertEqual(set(root.iterdir()), {Path(record['path']) for record in records})
-                self.assertTrue(all(not record['close_confirmed'] for record in records))
+                self.assertTrue(all(record['turn_id'] is None for record in records))
         self.assertEqual(len(list(root.iterdir())), 2)
         with self.assertRaises(Hold) as held:
             self.managed_run()
@@ -286,43 +282,32 @@ class Contract(unittest.TestCase):
             self.managed_run()
         self.engine = Engine(self.home, self.native)
         self.finish_managed()
-        self.assertEqual(self.close_managed()['status'], 'removed')
-        self.assertEqual(list(root.iterdir()), [])
+        (record,) = self.engine.execute('capacity')['managed_work']
+        self.assertEqual(record['turn_id'], 'turn')
+        self.assertEqual(self.close_managed()['status'], 'retained')
+        self.assertEqual(list(root.iterdir()), [Path(record['path'])])
 
-    def test_managed_cleanup_requires_verified_absence_in_original_workspace(self):
+    def test_managed_close_never_attempts_path_based_removal(self):
         self.managed_root()
         cwd = Path(self.managed_run()['working_directory'])
         self.finish_managed()
-        pane = self.native.pane
-
-        def unverified_layout(operation, *args, **kwargs):
-            if operation == 'layout' and self.native.worker not in self.native.rows:
-                return dict(workspace_id='other', tabs=[])
-            return pane(operation, *args, **kwargs)
-
-        with patch.object(self.native, 'pane', side_effect=unverified_layout):
-            self.assertEqual(self.close_managed()['reason'], 'workspace_changed')
-        self.assertTrue(cwd.is_dir())
-
-        self.config['herdr'] = {'instance': 'other-instance'}
-        self.save()
-        self.engine.execute('prepare_panes')
-        self.assertTrue(cwd.is_dir())
-        self.config.pop('herdr')
-        self.save()
-        self.engine = Engine(self.home, self.native)
-        self.engine.execute('prepare_panes')
-        self.assertFalse(cwd.exists())
+        with patch('os.rmdir', side_effect=AssertionError('unguarded directory removal')) as remove:
+            self.assertEqual(self.close_managed()['reason'], 'cleanup_guard_unavailable')
+            self.assertEqual(self.close_managed()['reason'], 'cleanup_guard_unavailable')
+            self.engine.execute('prepare_panes')
+            self.engine.execute('tick')
+        remove.assert_not_called()
+        self.assertEqual(list(cwd.iterdir()), [])
 
     def test_missing_pane_without_guarded_close_keeps_managed_directory(self):
         self.managed_root()
         cwd = Path(self.managed_run()['working_directory'])
         self.finish_managed()
         self.native.rows.remove(self.native.worker)
-        self.assertEqual(self.close_managed()['reason'], 'close_unverified')
+        self.assertEqual(self.close_managed()['reason'], 'cleanup_guard_unavailable')
         self.assertTrue(cwd.is_dir())
 
-    def test_managed_cleanup_rejects_a_deferred_close_or_reused_terminal(self):
+    def test_managed_cleanup_does_not_trust_close_receipts_after_binding_changes(self):
         self.managed_root()
         cwd = Path(self.managed_run()['working_directory'])
         self.finish_managed()
@@ -334,20 +319,40 @@ class Contract(unittest.TestCase):
             return pane(operation, *args, **kwargs)
 
         with patch.object(self.native, 'pane', side_effect=defer_close):
-            self.assertEqual(self.close_managed()['reason'], 'close_unverified')
+            self.assertEqual(self.close_managed()['status'], 'retained')
         self.assertTrue(cwd.is_dir())
 
-        def replace_pane(operation, *args, **kwargs):
+        def admit_operator_turn_and_replace_terminal(operation, *args, **kwargs):
+            if operation == 'close':
+                self.native.result.update(state='working', turn_id='operator-turn', active=True)
+                self.native.worker['terminal_id'] = 'replacement'
             result = pane(operation, *args, **kwargs)
             if operation == 'close':
-                self.native.rows.append(dict(pane_id='w1:p3', terminal_id='t2'))
+                result.update(terminal_id='t2', thread_id='thread', turn_id='turn')
             return result
 
-        with patch.object(self.native, 'pane', side_effect=replace_pane):
-            self.assertEqual(self.close_managed()['reason'], 'pane_present')
-        self.native.rows.pop()
-        self.assertEqual(self.close_managed()['reason'], 'close_unverified')
+        with patch.object(self.native, 'pane', side_effect=admit_operator_turn_and_replace_terminal):
+            receipt = self.engine.execute('close', pane_id='w1:p2')
+        self.assertTrue(receipt['closed'])
+        self.assertEqual(receipt['directory_cleanup']['reason'], 'cleanup_guard_unavailable')
         self.assertTrue(cwd.is_dir())
+        (journal,) = (self.home / 'project-manager').glob('work-*.json')
+        self.assertNotIn('closed', json.loads(journal.read_text()))
+
+    def test_legacy_close_flag_cannot_authorize_cleanup_on_restart(self):
+        self.managed_root()
+        cwd = Path(self.managed_run()['working_directory'])
+        self.finish_managed()
+        self.native.rows.remove(self.native.worker)
+        (journal,) = (self.home / 'project-manager').glob('work-*.json')
+        journal.write_text(json.dumps(dict(json.loads(journal.read_text()), closed=True)))
+        self.engine = Engine(self.home, self.native)
+        with patch('os.rmdir', side_effect=AssertionError('unguarded directory removal')):
+            self.assertEqual(self.close_managed()['reason'], 'cleanup_guard_unavailable')
+            self.engine.execute('prepare_panes')
+            self.engine.execute('tick')
+        self.assertTrue(cwd.is_dir())
+        self.assertTrue(journal.is_file())
 
     def test_active_or_unknown_worker_cannot_authorize_cleanup(self):
         self.managed_root()
@@ -361,7 +366,7 @@ class Contract(unittest.TestCase):
                 self.assertTrue(cwd.is_dir())
         self.assertEqual(self.native.closes, [])
 
-    def test_unknown_followup_invalidates_managed_cleanup_evidence(self):
+    def test_unknown_followup_clears_the_recorded_turn_and_retains_the_directory(self):
         self.managed_root()
         cwd = Path(self.managed_run()['working_directory'])
         self.finish_managed()
@@ -375,23 +380,54 @@ class Contract(unittest.TestCase):
         with patch.object(self.native, 'agent', side_effect=lose_followup):
             with self.assertRaises(Hold):
                 self.engine.execute('steer', pane_id='w1:p2', prompt='fixture follow-up')
+        (record,) = self.engine.execute('capacity')['managed_work']
+        self.assertIsNone(record['turn_id'])
         self.finish_managed()
-        self.assertEqual(self.close_managed()['reason'], 'close_unverified')
+        self.assertEqual(self.close_managed()['status'], 'retained')
         self.assertTrue(cwd.is_dir())
 
-    def test_managed_cleanup_waits_for_local_process_after_pane_close(self):
+    @unittest.skipUnless(sys.platform == 'linux', 'requires Linux per-thread filesystem state')
+    def test_managed_close_retains_directory_used_only_by_a_nonleader_thread(self):
         self.managed_root()
         cwd = Path(self.managed_run()['working_directory'])
         self.finish_managed()
-        with Popen([sys.executable, '-B', '-c', 'import sys; sys.stdin.read()'], cwd=cwd, stdin=PIPE) as child:
-            (self.home / 'proc' / str(child.pid)).symlink_to(f'/proc/{child.pid}', target_is_directory=True)
+
+        code = """
+import ctypes
+import os
+import sys
+import threading
+
+def hold_directory():
+    clone_fs = 0x00000200
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.unshare(clone_fs) != 0:
+        print(f'unshare unavailable: {os.strerror(ctypes.get_errno())}', flush=True)
+        return
+    os.chdir(sys.argv[1])
+    print(threading.get_native_id(), flush=True)
+    sys.stdin.read()
+
+worker = threading.Thread(target=hold_directory)
+worker.start()
+worker.join()
+"""
+        with Popen([sys.executable, '-B', '-c', code, str(cwd)], cwd=self.home,
+                   stdin=PIPE, stdout=PIPE, text=True) as child:
             try:
-                self.assertEqual(self.close_managed()['reason'], 'directory_in_use')
+                tid = child.stdout.readline().strip()
+                if tid.startswith('unshare unavailable:'):
+                    self.skipTest(tid)
+                self.assertTrue(tid.isdecimal(), tid)
+                proc = Path(f'/proc/{child.pid}')
+                self.assertEqual((proc / 'cwd').readlink(), self.home)
+                self.assertEqual((proc / 'task' / tid / 'cwd').readlink(), cwd)
+                self.assertEqual(self.close_managed()['reason'], 'cleanup_guard_unavailable')
                 self.assertTrue(cwd.is_dir())
             finally:
                 child.communicate()
-        self.assertEqual(self.close_managed()['status'], 'removed')
-        self.assertFalse(cwd.exists())
+        self.assertEqual(self.close_managed()['status'], 'retained')
+        self.assertTrue(cwd.is_dir())
 
     def test_render_once_and_reject_invalid_parameters(self):
         worker = Settings.read(self.home, raw_settings(self.home)).workers['worker']

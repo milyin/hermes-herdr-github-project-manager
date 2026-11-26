@@ -401,8 +401,7 @@ class Engine:
         if self.work.records:
             result['managed_work'] = [
                 dict(path=str(self.work.path(key)), worker=record['worker'], workspace_id=record['workspace_id'],
-                     pane_id=(record.get('binding') or {}).get('pane_id'), turn_id=record.get('turn_id'),
-                     close_confirmed=record['closed'])
+                     pane_id=(record.get('binding') or {}).get('pane_id'), turn_id=record.get('turn_id'))
                 for key, record in sorted(self.work.records.items())]
         return result
 
@@ -560,10 +559,10 @@ class Engine:
         if launch := self.pane_launch(pane_id):
             self.finish_launch(launch, row)
         self.rename(pane_id, 'status', f'{worker.tag}:RUN')
-        key = self.work_for_pane(pane_id)
+        key = self.work_for_pane(pane_id, row=row)
         if key:
-            # Invalidate the last known turn before sending anything to the receiver.
-            self.work.update(key, turn_id=None, closed=False)
+            # Keep an ambiguous follow-up from looking like the previous turn.
+            self.work.update(key, turn_id=None)
         try:
             reply = self.agent('steer', pane_id, '--thread-id', row['thread_id'], '--return-admission',
                                '--request-stdin', payload={'prompt': prompt, 'account': account})
@@ -575,11 +574,11 @@ class Engine:
                 if (current.get('turn_id'), current.get('thread_id')) == (row.get('turn_id'), row['thread_id']):
                     self.rename(pane_id, 'status', row['status'])
             raise
-        if key and self.work_matches(key, row):
+        if key:
             try:
                 self.work.update(key, turn_id=receipt['turn_id'])
             except OSError:
-                # A successful admission remains valid. Cleanup will lack a verified turn.
+                # A successful admission remains valid even if the journal update fails.
                 pass
         return receipt
 
@@ -624,10 +623,11 @@ class Engine:
         self.tracked(pane_id)
         return self.rename(pane_id, 'comment', comment)
 
-    def work_for_pane(self, pane_id):
+    def work_for_pane(self, pane_id, *, row=None):
         matches = [key for key, record in self.work.records.items()
                    if (record['instance'], record['workspace_id']) == (self.settings.instance, self.workspace_id)
-                   and (record.get('binding') or {}).get('pane_id') == pane_id]
+                   and (record.get('binding') or {}).get('pane_id') == pane_id
+                   and (row is None or self.work_matches(key, row))]
         return matches[0] if len(matches) == 1 else None
 
     def work_matches(self, key, row):
@@ -637,57 +637,6 @@ class Engine:
                 and record.get('binding') == {field: row.get(field) for field in BINDING}
                 and row.get('working_directory') == str(self.work.path(key)))
 
-    def completed_work(self, key, row):
-        return (self.work_matches(key, row) and row.get('lock') == 'unlocked'
-                and row.get('state') == 'done' and row.get('active') is False
-                and row.get('delivery') == 'read' and not row.get('attention') and not row.get('reason')
-                and not row.get('creation_pending') and row.get('herdr_status') not in ('working', 'blocked')
-                and identifier(row.get('turn_id')) and row['turn_id'] == self.work.records[key].get('turn_id'))
-
-    def verify_work_close(self, key, row):
-        if not self.completed_work(key, row):
-            return False
-        try:
-            result = self.query(row['pane_id'], row['turn_id'])
-            return (result.get('state') == 'done' and result.get('delivery') == 'read'
-                    and self.completed_work(key, self.worker_pane(row['pane_id'])))
-        except Hold:
-            return False
-
-    def reclaim_work(self, key):
-        record = self.work.records[key]
-        path = self.work.path(key)
-        receipt = dict(path=str(path), status='retained')
-        if not record['closed']:
-            return dict(receipt, reason='close_unverified')
-        worker = self.settings.workers.get(record['worker'])
-        configured = (self.settings.manager, *self.settings.workers.values())
-        if (not worker or worker.work_root != record['root']
-                or any(agent.cwd and Path(agent.cwd).is_relative_to(path) for agent in configured)):
-            return dict(receipt, reason='work_scope_changed')
-        try:
-            workspace = record['workspace_id']
-            bound = self.native.binding.get('workspace')
-            workspaces = self.native.pane('workspaces')['workspaces']
-            if (record['instance'] != self.settings.instance or workspace != self.workspace_id
-                    or (bound and bound != workspace)
-                    or sum(row['workspace_id'] == workspace for row in workspaces) != 1):
-                return dict(receipt, reason='workspace_unverified')
-            layout = self.layout()
-            binding = record['binding']
-            if any(not all(identifier(row.get(field)) for field in ('pane_id', 'terminal_id')) for row in layout):
-                return dict(receipt, reason='absence_unverified')
-            if any(any(row[field] == binding[field] for field in ('pane_id', 'terminal_id')) for row in layout):
-                # A reappearing binding invalidates the previous close receipt.
-                self.work.update(key, closed=False, turn_id=None)
-                return dict(receipt, reason='pane_present')
-            self.work.remove_empty(key)
-        except Hold as exc:
-            return dict(receipt, reason=exc.code)
-        except (KeyError, OSError, TypeError):
-            return dict(receipt, reason='cleanup_unverified')
-        return dict(receipt, status='removed')
-
     def close(self, pane_id):
         try:
             row = self.worker_pane(pane_id)
@@ -695,7 +644,7 @@ class Engine:
             if exc.code == 'pane_not_found' and self.workspace_id is not None:
                 receipt = dict(pane_id=pane_id, closed=True)
                 if key := self.work_for_pane(pane_id):
-                    receipt['directory_cleanup'] = self.reclaim_work(key)
+                    receipt['directory_cleanup'] = self.work.retention(key)
                 return receipt
             raise
         if row.get('admission') == 'unknown':
@@ -707,20 +656,12 @@ class Engine:
         if (row.get('native_state', row['state']) not in ('idle', 'done')
                 or not identifier(row.get('thread_id'))):
             raise Hold('not_idle', 'Wait for the worker turn to finish before closing its pane')
-        key = self.work_for_pane(pane_id)
-        verified = key is not None and self.verify_work_close(key, row)
         launch = self.pane_launch(pane_id)
         if launch is not None and row['lock'] == 'unlocked':
             self.finish_launch(launch, row)
         receipt = self.native.pane('close', '--pane', pane_id, '--defer-locked', workspace=self.workspace_id)
-        if key:
-            if (verified and receipt.get('closed') is True and receipt.get('pane_id') == pane_id
-                    and receipt.get('terminal_id', row['terminal_id']) == row['terminal_id']):
-                try:
-                    self.work.update(key, closed=True)
-                except OSError:
-                    pass
-            receipt['directory_cleanup'] = self.reclaim_work(key)
+        if key := self.work_for_pane(pane_id, row=row):
+            receipt['directory_cleanup'] = self.work.retention(key)
         return receipt
 
     @staticmethod
@@ -817,9 +758,6 @@ class Engine:
                     self.forget_launch(launch)
             except Hold as exc:
                 holds.append(dict(pane_id=pane, error=exc.as_dict()))
-        for key, record in tuple(self.work.records.items()):
-            if record['closed'] and (record['instance'], record['workspace_id']) == (self.settings.instance, self.workspace_id):
-                self.reclaim_work(key)
         return holds
 
     def prepare_panes(self):
