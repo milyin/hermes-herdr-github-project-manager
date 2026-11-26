@@ -1,6 +1,7 @@
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import re
 from subprocess import CompletedProcess, PIPE, Popen, TimeoutExpired, run
 import sys
 from tempfile import TemporaryDirectory
@@ -691,6 +692,94 @@ worker.join()
                                     capacity=dict(maximum=1, available=0, occupied_states={'w1:p3': 'working'})))
         self.assertEqual(self.native.submissions, [dict(type='worker_result', worker='worker',
                                                         pane_id='w1:p2', turn_id='turn', message='finished')])
+
+    def check_github_capacity_queue(self, assignment, section, *, follow_up=False):
+        repo = 'owner/repository'
+        self.config['manager'].update(
+            prompt_file=str(GITHUB_WORKFLOW / 'MANAGER_PROMPT.md'),
+            parameters=dict(REPO=repo, LABEL='opt-in', IMPLEMENTER='implementer',
+                            REVIEWER='reviewer', github_identity='fixture-app'))
+        self.save()
+        prompt = Settings.read(self.home, raw_settings(self.home)).manager.prompt.render()[0]
+        policy = prompt.split('## Worker queues and admission\n', 1)[1].split('## Merging conditions\n', 1)[0]
+        placements, = re.findall(rf'^\| {re.escape(assignment)} \| ([^|]+?) \| ([^|]+?) \|$', policy, re.MULTILINE)
+        self.assertIn('Move that entry between headings and subsections in a single dashboard update', prompt)
+        self.assertIn('move only the admitted feedback from pending to assigned', policy)
+
+        issue = f'https://github.com/{repo}/issues/12'
+        has_pr = follow_up or section == 'In review'
+        links = dict(issue=issue, pr=f'https://github.com/{repo}/pull/14' if has_pr else None)
+        head = 'a' * 40 if has_pr else None
+        panes = ['w1:p2'] if follow_up else ['w1:p4'] if has_pr else []
+        pending = ['review-comment-93'] if follow_up else []
+        entry = dict(links, head=head, panes=panes, pending=pending, assigned=[])
+        active = ['Need attention', 'In progress', 'In review', 'Done']
+        dashboard = {heading: {} for heading in (*active, 'In progress → Queue', 'In review → Queue')}
+        if has_pr:
+            dashboard['In review' if follow_up else 'In progress'][issue] = entry
+
+        def place(heading, updated):
+            for entries in dashboard.values():
+                entries.pop(issue, None)
+            dashboard[heading][issue] = updated
+
+        busy = dict(self.native.worker, pane_id='w1:p3', terminal_id='t3')
+        self.native.rows.append(busy)
+        busy_status = dict(self.native.result, state='working', active=True, thread_id='busy-thread',
+                           turn_id='busy-turn', working_directory=str(self.home))
+        agent = self.native.agent
+
+        def read_agent(operation, workspace, pane, *args, **kwargs):
+            if pane == busy['pane_id']:
+                self.assertEqual(operation, 'status')
+                return dict(busy_status)
+            return agent(operation, workspace, pane, *args, **kwargs)
+
+        if follow_up:
+            self.native.worker['status'] = 'I:UNREAD'
+            self.native.rows.append(self.native.worker)
+            operation, arguments = 'steer', dict(pane_id=panes[0], prompt=f'Address {pending[0]} at {head}')
+        else:
+            operation, arguments = 'run', dict(name='worker', parameters={'TASK': f'{assignment} for {issue} {head or ""}'})
+
+        waiting, admitted = placements
+        with patch.object(self.native, 'agent', side_effect=read_agent):
+            self.assertEqual(self.engine.execute('capacity')['available'], 0)
+            with self.assertRaises(Hold) as refused:
+                self.engine.execute(operation, **arguments)
+            self.assertEqual(refused.exception.code, 'capacity')
+            self.assertEqual(self.engine.execute('capacity')['unresolved_launches'], [])
+            place(waiting, entry)
+            self.assertEqual([heading for heading, entries in dashboard.items() if issue in entries],
+                             [f'{section} → Queue'])
+            self.assertEqual(dashboard[waiting][issue], dict(links, head=head, panes=panes,
+                                                            pending=pending, assigned=[]))
+
+            busy_status.update(state='done', active=False)
+            self.assertEqual(self.engine.execute('capacity')['available'], 1)
+            self.assertIn(issue, dashboard[waiting])
+            receipt = self.engine.execute(operation, **arguments)
+            self.assertEqual(receipt['status'], 'accepted')
+            self.assertEqual(receipt['turn_id'], 'follow-up' if follow_up else 'turn')
+            if operation == 'run':
+                self.assertEqual(receipt['admission'], 'accepted')
+            place(admitted, dict(entry, panes=list(dict.fromkeys([*panes, receipt['pane_id']])),
+                                 turn=receipt['turn_id'], pending=[], assigned=pending))
+
+        self.assertEqual([heading for heading, entries in dashboard.items() if issue in entries], [section])
+        self.assertEqual(dashboard[section][issue], dict(links, head=head,
+                                                        panes=panes if follow_up else [*panes, 'w1:p2'],
+                                                        turn=receipt['turn_id'], pending=[], assigned=pending))
+        self.assertEqual(self.native.runs, 0 if follow_up else 1)
+
+    def test_github_new_issue_queues_until_implementation_is_admitted(self):
+        self.check_github_capacity_queue('New implementation or implementation follow-up', 'In progress')
+
+    def test_github_feedback_queues_until_follow_up_is_admitted(self):
+        self.check_github_capacity_queue('New implementation or implementation follow-up', 'In progress', follow_up=True)
+
+    def test_github_exact_head_queues_until_review_is_admitted(self):
+        self.check_github_capacity_queue('Review of a reviewable PR at its current head', 'In review')
 
     def test_zoom_and_acknowledged_attention_use_a_slot(self):
         self.native.worker['user_locked'] = True

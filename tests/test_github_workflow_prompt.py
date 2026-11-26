@@ -172,7 +172,7 @@ class GitHubWorkflowPrompt(unittest.TestCase):
     def test_rendered_workflow_and_qualifying_write(self):
         for required in ('clean verdict', 'no outstanding actionable feedback', 'required checks',
                          'even if GitHub requires zero approvals', 'after checking collaborator access',
-                         'Leave auto-merge and queue admission to the operator'):
+                         'Leave auto-merge and merge queue admission to the operator'):
             self.assertIn(required, self.procedure)
         self.assertEqual(self.run_command(), dict(status='Merged', head=HEAD, merge_sha=MERGE_SHA))
         self.assertEqual([(method, path) for method, path, _ in self.calls[-8:]], [
