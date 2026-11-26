@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import yaml
 
 from project_manager_engine.settings import SKILL, Settings
-from scripts.ensure_github_label import ensure_label
+from workflows.github.ensure_github_label import ensure_label
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,10 +29,12 @@ class BundledWorkflows(unittest.TestCase):
         self.home = Path(temp.name)
         (self.home / 'skills').mkdir()
         (self.home / 'skills' / SKILL).symlink_to(ROOT, target_is_directory=True)
-        docs = (ROOT / 'doc' / 'PROFILE.md').read_text(encoding='utf-8')
-        github, demo = map(yaml.safe_load, re.findall(r'```yaml\n(.*?)\n```', docs, re.DOTALL))
-        self.github = github['skills']['config'][SKILL]
-        self.demo = demo
+        def profile(workflow):
+            guide = (ROOT / 'workflows' / workflow / 'README.md').read_text(encoding='utf-8')
+            return yaml.safe_load(re.search(r'```yaml\n(.*?)\n```', guide, re.DOTALL)[1])
+
+        self.github = profile('github')['skills']['config'][SKILL]
+        self.demo = profile('hello-world')
         for config in (self.github, self.demo):
             for agent in (config['manager'], *config['workers']):
                 agent['working_directory'] = str(self.home)
@@ -47,12 +49,11 @@ class BundledWorkflows(unittest.TestCase):
         reviewer, _ = settings.workers['reviewer'].prompt.render(
             {'github_identity': APP, 'REPO': REPO, 'ISSUE': '6', 'PR': '7', 'HEAD': 'a' * 40})
         for prompt in (manager, implementer, reviewer):
-            for action in ('status', 'gh', 'git'):
+            for action in ('gh', 'git'):
                 self.assertIn(f'{APP} --repo {REPO} {action}', prompt)
-            self.assertIn(f'{APP}[bot]', prompt)
+            self.assertNotIn(f'{APP} --repo {REPO} status', prompt)
             self.assertIn('Do not use personal accounts', prompt)
         self.assertIn(f'Pass `github_identity` as `{APP}` to both workers', manager)
-        self.assertIn('`permissions.contents` is `write`', manager)
 
     def test_demo_example_renders_without_github_configuration(self):
         settings = Settings.read(self.home, self.demo)
@@ -127,7 +128,9 @@ class StartupInterview(unittest.TestCase):
         self.assertIn(str(ROOT / 'doc' / 'PROFILE.md'), message)
         self.assertIn(str(self.home / 'config.yaml'), message)
         self.assertIn('Start with the workflow choice', message)
-        self.assertIn('GitHub App setup link', message)
+        self.assertIn('creating a workflow from scratch', message)
+        self.assertIn('Follow the selected workflow setup guide', message)
+        self.assertNotIn('GitHub App', message)
 
     def test_startup_retries_definite_gateway_rejection(self):
         self.discovery.state = 'starting'
@@ -182,7 +185,7 @@ class OptInLabel(unittest.TestCase):
                    '--raw-field', 'color=1d76db', '--raw-field', 'description=Opt in to project-manager automation']
 
     def setUp(self):
-        run = patch('scripts.ensure_github_label.subprocess.run')
+        run = patch('workflows.github.ensure_github_label.subprocess.run')
         self.run = run.start()
         self.addCleanup(run.stop)
         self.status = SimpleNamespace(stdout=json.dumps({'authenticated': True, 'actor': f'{APP}[bot]',

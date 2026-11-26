@@ -52,7 +52,7 @@ The implementer in the [profile example](PROFILE.md#settings) accepts an issue o
 
 ```text
 /project-manager run implementer --param REPO=owner/repository --param ISSUE=owner/repository#42 --param "TASK=Implement the issue and run tests"
-/project-manager run implementer --param REPO=owner/repository --param PR=https://github.com/owner/repository/pull/27 --param "TASK=Address the review feedback"
+/project-manager run reviewer --param SOURCE=/absolute/path/to/draft --param "TASK=Review the introduction"
 ```
 
 Each `--param` takes one `KEY=VALUE` token. Quote the whole token with double quotes for spaces and use `\"` and `\\` inside quoted values for a literal quote and backslash. The handler reads text, with no shell expansion. `--cwd` selects an existing absolute working directory for this run. With options, text after `--` is an optional literal addition to the rendered prompt. In the short form, `run NAME PROMPT` passes the remaining text as the task. See [parameter resolution](PROFILE.md#prompt-files).
