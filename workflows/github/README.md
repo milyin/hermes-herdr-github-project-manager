@@ -115,6 +115,8 @@ skills:
 
 ## Update an existing GitHub profile
 
+Start with the [installed profile upgrade checklist](../../doc/PROFILE.md#upgrade-an-installed-profile). Keep the watchdog paused during launcher and prompt migration.
+
 If the existing App JSON uses the legacy fields below, create a separate JSON file outside the skill. Use `umask 077` before creating it and keep it owned by the running user with mode `0600`. Populate it with these four fields.
 
 | Legacy field | Proxy field | Value |
@@ -136,4 +138,6 @@ If any of the three `prompt_file` values still use `doc/`, replace only those va
 | `doc/IMPLEMENTER_PROMPT.md` | `workflows/github/IMPLEMENTER_PROMPT.md` |
 | `doc/REVIEWER_PROMPT.md` | `workflows/github/REVIEWER_PROMPT.md` |
 
-Keep the existing manager and worker records, parameter values, models, working directories, launch profiles, and pane settings. Run `/project-manager` in that profile to validate the configuration.
+Keep the existing manager and worker records, parameter values, models, working directories, launch profiles, and pane settings. Read back the three prompt paths and verify that the files resolve in the selected profile.
+
+Before resuming, verify that the manager resolves the intended launcher. Run `APP_SLUG --repo OWNER/REPO status` to confirm its identity and repository, then run `APP_SLUG --repo OWNER/REPO merge-reviewed --help` and check that it advertises `--reviewed-head`. A legacy launcher can pass `status` but lack the checked merge command. If that happens, finish the proxy migration and repeat the checks; do not substitute a raw merge request or test by merging a live PR.
