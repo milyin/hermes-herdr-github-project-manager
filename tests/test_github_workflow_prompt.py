@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import shlex
 from string import Template
+from subprocess import CompletedProcess
 import sys
 from tempfile import TemporaryDirectory
 import unittest
@@ -52,7 +53,8 @@ class GitHubWorkflowPrompt(unittest.TestCase):
         config['manager']['parameters'].update(REPO=REPO, github_identity=APP)
         for agent in (config['manager'], *config['workers']):
             agent['working_directory'] = temporary.name
-        prompt = Settings.read(home, config).manager.prompt.render()[0]
+        self.workflows = Settings.read(home, config)
+        prompt = self.workflows.manager.prompt.render()[0]
         procedure = prompt.split('## Merging conditions\n', 1)[1].split('## Worker result\n', 1)[0]
         command = re.search(r'```bash\n(.*?)\n\s*```', procedure, re.DOTALL)[1].replace('\\\n', '')
         self.command = Template(command)
@@ -141,6 +143,31 @@ class GitHubWorkflowPrompt(unittest.TestCase):
     def assert_hold(self, status='Need attention', **options):
         self.assertEqual(self.run_command(**options)['status'], status)
         self.assertFalse(any(method in {'PUT', 'PATCH', 'DELETE'} for method, _, _ in self.calls))
+
+    def test_reviewer_publication_is_an_exact_head_comment(self):
+        prompt, _ = self.workflows.workers['reviewer'].prompt.render(
+            dict(REPO=REPO, ISSUE='12', PR='14', HEAD=HEAD, github_identity=APP))
+        command = re.search(r'```bash\n(.*?)\n```', prompt, re.DOTALL)[1].replace('\\\n', '')
+        for verdict in ('clean', 'changes_requested'):
+            with self.subTest(verdict=verdict):
+                body = f'Issue #12, PR #14, head {HEAD}\nVerdict: {verdict}\n  Evidence: "$PWD" → unchanged\n'
+                launcher, *args = [Template(arg).substitute(pr_number='14', reviewed_head=HEAD, review_body=body)
+                                   for arg in shlex.split(command)]
+                self.assertEqual(launcher, APP)
+                with (patch.object(sys, 'argv', [APP]),
+                      patch('workflows.github.github_app.jwt', return_value='app-proof'),
+                      patch('workflows.github.github_app.request', side_effect=self.request),
+                      patch('workflows.github.github_app.subprocess.run', return_value=CompletedProcess([], 0)) as gh):
+                    self.assertEqual(main(args, config_path=self.config_path), 0)
+                self.assertEqual(gh.call_args.args[0], [
+                    'gh', 'api', PR.lstrip('/') + '/reviews', '--method', 'POST',
+                    '--raw-field', 'event=COMMENT', '--raw-field', f'commit_id={HEAD}',
+                    '--raw-field', f'body={body}',
+                ])
+                self.assertEqual(gh.call_args.kwargs['env']['GH_TOKEN'], 'installation-fixture-token')
+        self.assertIn('Recheck the current PR head after publication', prompt)
+        self.assertIn('Return a short notification in your terminal result', prompt)
+        self.assertIn('Leave the detailed review body in the PR review', prompt)
 
     def test_rendered_workflow_and_qualifying_write(self):
         for required in ('clean verdict', 'no outstanding actionable feedback', 'required checks',

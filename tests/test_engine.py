@@ -1,7 +1,8 @@
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from subprocess import CompletedProcess, TimeoutExpired
+from subprocess import CompletedProcess, TimeoutExpired, run
+import sys
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -12,6 +13,9 @@ from project_manager_engine.engine import Engine, quota_plan
 from project_manager_engine.hermes_native import Native, WATCHDOG_INPUT, unknown_watchdog_admission
 from project_manager_engine.interface import parse
 from project_manager_engine.settings import Hold, SKILL, Settings, raw_settings
+
+
+GITHUB_WORKFLOW = Path(__file__).resolve().parents[1] / 'workflows' / 'github'
 
 
 class Dependencies:
@@ -170,6 +174,77 @@ class Contract(unittest.TestCase):
         self.engine.execute('mark_read', pane_id='w1:p2', turn_id='turn')
         self.assertEqual(self.engine.execute('query', pane_id='w1:p2')['delivery'], 'read')
         self.assertEqual(self.engine.execute('capacity')['occupied'], [])
+
+    def test_watchdog_submits_full_literal_worker_result(self):
+        message = (' \tCafé @file:notes.md\r\n  $PWD "quoted" \\u0040 {{HEAD}}\n'
+                   + 'x' * 12001 + '\n  suffix \n')
+        self.native.rows.append(self.native.worker)
+        self.native.turn_results['turn'] = dict(self.native.result, message=message)
+        with patch.object(self.native, 'submit', wraps=self.native.submit) as submit:
+            self.assertEqual(self.engine.execute('tick')['event'], 'worker_result')
+
+        wire = submit.call_args.args[1].split('Watchdog event (data):\n', 1)[1]
+        self.assertNotIn('@', wire)
+        event = json.loads(wire)
+        self.assertNotIn('truncated', event)
+        self.assertEqual(event['message'], message)
+        self.assertEqual(self.engine.execute('query', pane_id='w1:p2', turn_id='turn')['message'], message)
+
+    def test_github_handoffs_reach_a_recipient_with_only_terminal_input(self):
+        adapter = Native(self.home)
+        empty_directory = self.home / 'worker'
+        terminal = (
+            'import json, sys\n'
+            'prompt = json.load(sys.stdin)["prompt"]\n'
+            'print(json.dumps(dict(ok=True, result=dict(status="accepted", thread_id="thread", '
+            'turn_id=sys.argv[1], transcript=prompt))))\n'
+        )
+        agent = self.native.agent
+
+        def isolated_child(*args, env, **kwargs):
+            return run(*args, env={}, cwd=empty_directory, **kwargs)
+
+        def deliver(operation, workspace, pane, *options, payload=None):
+            if operation in ('run', 'steer'):
+                self.assertEqual(options[-1], '--request-stdin')
+                turn = 'turn' if operation == 'run' else 'follow-up'
+                with patch('project_manager_engine.hermes_native.subprocess.run', side_effect=isolated_child):
+                    return adapter.invoke([sys.executable, '-I', '-S', '-c', terminal, turn],
+                                          {'prompt': payload['prompt']})
+            return agent(operation, workspace, pane, *options, payload=payload)
+
+        repo, issue, pr = 'owner/repository', '12', '34'
+        reviewed_head, new_head = 'a' * 40, 'b' * 40
+        implementation = ('  parser.py:38 now preserves CRLF.\r\n'
+                          '  python -m unittest test_parser → 8 passed.\n'
+                          '  Regression text: {{HEAD}} $PWD @file:fixture\n\n')
+        findings = ('  parser.py:38 strips whitespace from the final line.\r\n'
+                    '  Observed: "end" for input "end  ". Expected: "end  ".\n'
+                    '  Preserve the trailing spaces and add a regression case.\n  ')
+        evidence = f'Issue #{issue}, PR #{pr}, head {new_head}\n\n{implementation}'
+        follow_up = f'{repo} issue #{issue}, PR #{pr}, reviewed head {reviewed_head}\n\n{findings}'
+        worker = self.config['workers'][0]
+        worker.update(prompt_file=str(GITHUB_WORKFLOW / 'REVIEWER_PROMPT.md'),
+                      parameters=dict(REPO=None, ISSUE=None, PR=None, HEAD=None, github_identity='fixture-app'))
+        self.save()
+        with patch.object(self.native, 'agent', side_effect=deliver):
+            reviewer = self.engine.execute('run', name='worker', prompt=evidence,
+                                           parameters=dict(REPO=repo, ISSUE=issue, PR=pr, HEAD=new_head))
+            self.assertTrue(reviewer['transcript'].endswith('\n\n' + evidence))
+
+            self.native.result.update(state='done', turn_id='turn')
+            self.engine.execute('prepare_panes')
+            self.native.rows.remove(self.native.worker)
+            worker.update(prompt_file=str(GITHUB_WORKFLOW / 'IMPLEMENTER_PROMPT.md'),
+                          parameters=dict(REPO=None, ISSUE=None, PR=None, TASK=None, github_identity='fixture-app'))
+            self.save()
+            implementer = self.engine.execute('run', name='worker',
+                                              parameters=dict(REPO=repo, ISSUE=issue, PR=pr, TASK=follow_up))
+            self.assertIn('\n\n' + follow_up + '\n\n', implementer['transcript'])
+
+            self.native.result.update(state='done', turn_id='turn')
+            steered = self.engine.execute('steer', pane_id=implementer['pane_id'], prompt=follow_up)
+            self.assertEqual(steered['transcript'], follow_up)
 
     def test_periodic_is_held_with_a_verified_busy_worker_at_limit_one(self):
         self.native.rows.append(self.native.worker)

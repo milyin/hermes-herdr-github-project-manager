@@ -15,7 +15,6 @@ WORKER_OPERATIONS = ('run', 'steer', 'query', 'mark_read', 'set_comment', 'close
                      'workers', 'panes', 'capacity', 'quota')
 COMMANDS = (*WORKER_OPERATIONS, 'prepare_panes', 'tick')
 OCCUPIED = {'starting', 'working', 'blocked', 'suspended', 'unknown'}
-EXCERPT_LIMIT = 12000
 # The receiver reports deadline_elapsed before any prompt bytes are written.
 # Partial writes, reply deadlines and failures after admission use other codes.
 RUN_REFUSALS = {'user_locked', 'lock_unknown', 'worker_unavailable', 'turn_active', 'already_started',
@@ -718,10 +717,7 @@ class Engine:
                 result = self.query(report['pane_id'], report['turn_id'])
                 if result['state'] != 'done':
                     return {'action': 'report_held'}
-                message = result['message']
-                event.update(type='worker_result', message=message[:EXCERPT_LIMIT])
-                if len(message) > EXCERPT_LIMIT:
-                    event['truncated'] = True
+                event.update(type='worker_result', message=result['message'])
         refreshed = self.panes()['panes']
         managers = [row for row in refreshed if row['role'] == 'manager' and row['pane_id'] == manager['pane_id']]
         if len(managers) != 1 or not self.manager_idle(managers[0]):
@@ -734,8 +730,10 @@ class Engine:
                 return {'action': 'report_held'}
         manager_prompt, _ = self.settings.manager.prompt.render()
         workers = {worker.name: worker.description for worker in self.settings.workers.values()}
+        # Keep Hermes context references inert while preserving the decoded event.
+        event_data = json.dumps(event, ensure_ascii=False).replace('@', r'\u0040')
         payload = (manager_prompt + '\n\nConfigured workers: ' + json.dumps(workers, ensure_ascii=False)
-                   + '\n\nWatchdog event (data):\n' + json.dumps(event, ensure_ascii=False))
+                   + '\n\nWatchdog event (data):\n' + event_data)
         if report:
             slots = self.worker_slots(row for row in refreshed if row['role'] == 'worker')
         else:

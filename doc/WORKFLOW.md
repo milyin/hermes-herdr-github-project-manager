@@ -8,6 +8,14 @@ The **workflow** is the set of user-selected manager and worker prompts. It defi
 
 The **engine** is the project-agnostic part of the installable skill and plugin. It renders prompts, prepares panes, tracks turns, enforces quota and concurrency, and delivers worker results. Its input contract treats prompt text, parameters, pane comments, and results as opaque data. Herdr's live pane list is the source of truth for which worker panes the engine tracks. Each pane label's status field holds its delivery state. The engine retains the manager's conversation and exact Herdr binding so it can reopen the same conversation when its pane is replaced. The engine reads worker bindings, exact turns, results, and receipts through the dependency APIs.
 
+## Worker handoff boundary
+
+The workflow selects the relevant result on the manager side and puts the actual task, references, and evidence in each receiving worker's managed terminal prompt. Include enough information for a worker with only that input to act. Copies of findings, output, and code retain their original text. Manager-side IDs can track delivery and deduplicate assignments. A worker receives its context directly, without needing the manager's tools, API, session history, or filesystem.
+
+The engine renders a new worker's template and appends the supplied prompt. It forwards a follow-up as supplied. It sends those strings to the agent manager as JSON over stdin and reads the worker's final result from the verified native turn. Neither the engine nor the Herdr pane layout generates handoff wording. The agent manager submits the input to the bound Codex session, and the Hermes gateway accepts the result event into the bound manager session. Runtime admission and size limits still apply. Handling any further text changes inside those dependencies belongs to the corresponding dependency.
+
+Workflows can still use their normal project services. The [GitHub workflow](../workflows/github/README.md#worker-handoffs) publishes a PR review directly and uses the managed terminal for the publication notice and the complete follow-up assignment.
+
 The manager runs the workflow in a Hermes gateway session displayed in the terminal UI (TUI) in a dedicated Herdr pane. It calls the [project-manager tools](COMMANDS.md#manager-tools) to delegate and inspect workers. The engine uses the pane manager for layout and the agent manager for worker sessions and quota.
 
 Provide one implementation for each operation and use it from Hermes commands, manager tools and cron. They share the same profile binding, observations, guards and result fields. In particular, manual inspection and cron use the same pane, quota, and capacity queries.
@@ -112,7 +120,7 @@ If Hermes reports an `unknown` watchdog admission at the head of the manager que
 
 ## Deliver a worker result
 
-Send a `worker_result` event with `worker`, `pane_id`, the native `turn_id` and `message`. If the full result exceeds the input limit, send a bounded excerpt with `truncated: true`. The full result is available through `query PANE_ID --turn TURN_ID`. Present the result as data alongside the configured manager prompt.
+Send a `worker_result` event with `worker`, `pane_id`, the native `turn_id` and the full `message`. Present the result as JSON data alongside the configured manager prompt. JSON escaping protects literal text, including at-signs that Hermes would otherwise treat as context references. The decoded message equals the native result returned by the manager-side query.
 
 Identify a result by workspace, worker pane ID and worker turn ID. A gateway admission confirms submission. The pane remains unread until the workflow acknowledges the result or the pane moves on to another turn or closes. The result remains eligible for delivery on a later tick once the manager is idle and has no pending admissions. Repeated delivery of the same result is allowed.
 

@@ -48,6 +48,12 @@ Each invocation verifies the configured App and repository before dispatch. Use 
 
 GitHub's merge readiness and active branch rules are checked before the direct merge. The workflow also requires a clean worker verdict, cleared actionable feedback, and an active independent human approval for the exact head. The manager supplies the verdict and feedback decision from verified workflow records. The SHA pin guards against head changes. Review state can still change between the final read and the write. GitHub branch rules supply any server-side review enforcement. [Merge instructions](MANAGER_PROMPT.md#merging-conditions) · [GitHub merge endpoint](https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request)
 
+## Worker handoffs
+
+The manager sends self-contained assignments in the worker's managed terminal. A review assignment carries the issue, PR, exact head, and implementation evidence. An implementation follow-up carries the references, reviewed head, actual findings, supporting details, and requested changes. Pane, turn and feedback IDs stay with the manager for tracking. The wiki records a short status and the identifiers needed to resume work. [Worker handoff boundary](../../doc/WORKFLOW.md#worker-handoff-boundary)
+
+The reviewer publishes a submitted GitHub comment review pinned to the reviewed SHA and returns a short terminal notification. This is ordinary PR review publication. The manager verifies the publication, reads the findings, and includes their text in the implementer's terminal prompt. The App's review records the worker verdict. Approval still comes from an independent human reviewer on the exact current head. [Reviewer prompt](REVIEWER_PROMPT.md) · [GitHub review endpoint](https://docs.github.com/en/rest/pulls/reviews#create-a-review-for-a-pull-request)
+
 ## Profile settings
 
 Replace the models, working directories, repository, label, and App slug below. The manager passes its selected identity to both workers. Keep worker defaults in sync for manual runs.
