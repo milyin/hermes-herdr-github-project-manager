@@ -17,34 +17,34 @@ The manager tracks opted-in issues, delegates implementation and review, and pub
    }
    ```
 
-4. Run the [installer](install_proxy.py) to create a command named for the configured App slug. Put it in a trusted directory on the manager and both workers' `PATH`. The proxy uses the absolute JSON path passed to the installer, regardless of the process's `XDG_CONFIG_HOME`. Keep the workflow directory intact and make Python 3.10+, OpenSSL, Git, and GitHub CLI available where the proxy runs.
+4. Run the [installer](install_proxy.py) to create the App-slug wrapper in the selected profile's `bin/` directory, visible to all three roles. The engine resolves `profile_executable` declarations there and supplies the absolute command in prompts. It refuses missing, linked or non-executable wrappers before rendering and never searches `PATH` for them. The wrapper invokes the bundled launcher with the fixed JSON path, independent of `XDG_CONFIG_HOME`. Keep the workflow directory intact and make Python 3.10+, OpenSSL, Git, and GitHub CLI available where the wrapper runs.
 
    ```sh
    python3 -B /absolute/path/to/skill/workflows/github/install_proxy.py \
-     --config /absolute/path/to/your-app-slug.json --bin-dir "$HOME/.local/bin"
+     --config /absolute/path/to/your-app-slug.json --bin-dir /absolute/path/to/profile/bin
    ```
 
 5. Confirm the repository wiki is available, enabled, and initialized with a first page. A private repository needs a plan that includes wikis. [GitHub wiki availability](https://docs.github.com/en/communities/documenting-your-project-with-wikis)
 6. Confirm the repository, App, and opt-in label with the operator. Use the bundled label helper to find or create the label. Save the returned name as the manager's `LABEL` parameter. The operator controls which issues carry the opt-in label.
 
    ```bash
-   python3 -B /absolute/path/to/skill/workflows/github/ensure_github_label.py -- OWNER/REPO APP_SLUG 'hermes:projectmanager'
+   python3 -B /absolute/path/to/skill/workflows/github/ensure_github_label.py -- OWNER/REPO /absolute/path/to/profile/bin/your-app-slug 'hermes:projectmanager'
    ```
 
 7. Fill in the [profile settings](#profile-settings), save the operator-confirmed profile, and run `/project-manager`. With the operator, verify the workflow on an opted-in issue.
 
 ## Using the launcher
 
-Pass `--repo OWNER/REPO` before the action. Use `gh` for supported issue and PR commands and repository REST endpoints. Put the endpoint first after `gh api`. Use numeric issue and PR selectors for CLI commands, and pass `--head` to `gh pr create` after pushing through the launcher. Use the checked `merge-reviewed` action for direct merges.
+Set `APP_WRAPPER` to the absolute path printed by the installer. Pass `--repo OWNER/REPO` before the action. Use `gh` for supported issue and PR commands and repository REST endpoints. Put the endpoint first after `gh api`. Use numeric issue and PR selectors and omit `gh -R` or `gh --repo`; the wrapper supplies the repository. Pass `--head` to `gh pr create` after pushing through the wrapper. Use the checked `merge-reviewed` action for direct merges. If the pinned wrapper fails, report the blocker rather than using a different launcher or identity.
 
 Pass the exact credential-free HTTPS repository or wiki URL to remote Git commands. Run the command from the intended checkout. Push an explicit branch refspec. For example:
 
 ```bash
-APP_SLUG --repo OWNER/REPO git fetch https://github.com/OWNER/REPO.git refs/pull/42/head
-APP_SLUG --repo OWNER/REPO git push https://github.com/OWNER/REPO.git HEAD:refs/heads/issue-42
+"$APP_WRAPPER" --repo OWNER/REPO git fetch https://github.com/OWNER/REPO.git refs/pull/42/head
+"$APP_WRAPPER" --repo OWNER/REPO git push https://github.com/OWNER/REPO.git HEAD:refs/heads/issue-42
 ```
 
-Each invocation verifies the configured App and repository before dispatch. Use `APP_SLUG --repo OWNER/REPO status` to inspect the actor, repository, and permissions. Native Git and GitHub CLI commands use isolated configuration and repository-scoped App credentials. The launcher scopes the operations it handles, and the workflow prompts require its use. Use operator-managed execution controls if a session must be restricted to the launcher.
+Each invocation verifies the configured App and repository before dispatch. Use `"$APP_WRAPPER" --repo OWNER/REPO status` to inspect the actor, repository, and permissions. Native Git and GitHub CLI commands use isolated configuration and repository-scoped App credentials. The launcher scopes the operations it handles, and the workflow prompts require its use. Use operator-managed execution controls if a session must be restricted to the launcher.
 
 GitHub's merge readiness and active branch rules are checked before the direct merge. The workflow also requires a clean worker verdict, cleared actionable feedback, and an active independent human approval for the exact head. The manager supplies the verdict and feedback decision from verified workflow records. The SHA pin guards against head changes. Review state can still change between the final read and the write. GitHub branch rules supply any server-side review enforcement. [Merge instructions](MANAGER_PROMPT.md#merging-conditions) · [GitHub merge endpoint](https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request)
 
@@ -58,7 +58,7 @@ The reviewer publishes a submitted GitHub comment review pinned to the reviewed 
 
 ## Profile settings
 
-Replace the models, working directories, repository, label, and App slug below. The manager passes its selected identity to both workers. Keep worker defaults in sync for manual runs.
+Replace the models, working directories, repository, label, and App slug below. Set all three `github_identity.profile_executable` values to the installed wrapper's basename, not its absolute path. The engine passes the resolved command to the manager and workers; a `run` call cannot override it.
 
 ```yaml
 plugins:
@@ -83,7 +83,7 @@ skills:
           LABEL: hermes:projectmanager
           IMPLEMENTER: implementer
           REVIEWER: reviewer
-          github_identity: your-app-slug
+          github_identity: {profile_executable: your-app-slug}
       workers:
         - name: implementer
           pane_tag: I
@@ -97,7 +97,7 @@ skills:
             ISSUE: none
             PR: none
             TASK: null
-            github_identity: your-app-slug
+            github_identity: {profile_executable: your-app-slug}
         - name: reviewer
           pane_tag: R
           agent: codex
@@ -110,7 +110,7 @@ skills:
             ISSUE: null
             PR: null
             HEAD: null
-            github_identity: your-app-slug
+            github_identity: {profile_executable: your-app-slug}
 ```
 
 ## Update an existing GitHub profile
@@ -123,12 +123,12 @@ If the existing App JSON uses the legacy fields below, create a separate JSON fi
 | --- | --- | --- |
 | `expected_slug` | `app_slug` | The same App slug |
 | `app_id` | `app_id` | The same GitHub App ID |
-| `default_repository` | `repository` | The same `OWNER/REPO` |
+| `default_repository` | `repository` | The profile's verified `OWNER/REPO`; the legacy default may differ |
 | `key_path` | `private_key` | The absolute path to the existing private key file |
 
 Reuse the existing key in place. Put only its path in `private_key`, and keep the key file private and owned by the running user. If the old value starts with `~/`, expand it using the original user's home directory. Resolve a relative path from the working directory the legacy launcher used, and use the path to the regular key file if the old path is a symlink.
 
-Pass the new JSON's absolute path to `install_proxy.py --config` as shown in step 4. A JSON file that already uses the proxy fields can be passed directly. If the destination already contains a command with the same App slug, use a trusted directory earlier on the workflow's `PATH` and ensure the manager and workers resolve the new proxy.
+Pass the new JSON's absolute path to `install_proxy.py --config` as shown in step 4. A JSON file that already uses the proxy fields can be passed directly. Leave the shared launcher unchanged. Replace all three scalar `github_identity` settings with a `profile_executable` declaration for the same App slug. Previously delivered prompts are not rewritten; the engine supplies the current command automatically on `steer`.
 
 If any of the three `prompt_file` values still use `doc/`, replace only those values. These examples are relative to the profile directory. For absolute paths, keep the checkout prefix and replace the part after it.
 
@@ -138,6 +138,6 @@ If any of the three `prompt_file` values still use `doc/`, replace only those va
 | `doc/IMPLEMENTER_PROMPT.md` | `workflows/github/IMPLEMENTER_PROMPT.md` |
 | `doc/REVIEWER_PROMPT.md` | `workflows/github/REVIEWER_PROMPT.md` |
 
-Keep the existing manager and worker records, parameter values, models, working directories, launch profiles, and pane settings. Read back the three prompt paths and verify that the files resolve in the selected profile.
+Preserve the other manager and worker parameters, models, working directories, launch profiles, and pane settings. Read back the three prompt paths and verify that the files resolve in the selected profile.
 
-Before resuming, verify that the manager resolves the intended launcher. Run `APP_SLUG --repo OWNER/REPO status` to confirm its identity and repository, then run `APP_SLUG --repo OWNER/REPO merge-reviewed --help` and check that it advertises `--reviewed-head`. A legacy launcher can pass `status` but lack the checked merge command. If that happens, finish the proxy migration and repeat the checks; do not substitute a raw merge request or test by merging a live PR.
+Before resuming, verify scoped `status`, a read-only GitHub command, and a read-only Git command with the exact wrapper in the manager and worker runtimes. From the manager, check that `"$APP_WRAPPER" --repo OWNER/REPO merge-reviewed --help` advertises `--reviewed-head`. A legacy launcher can pass `status` but lack the checked merge command. If a check fails, finish the proxy migration and repeat the checks; do not fall back to a shared launcher, substitute a raw merge request, or test by merging a live PR.

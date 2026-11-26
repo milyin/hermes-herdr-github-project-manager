@@ -4,6 +4,7 @@ from pathlib import Path
 from subprocess import CompletedProcess, PIPE, Popen, TimeoutExpired, run
 import sys
 from tempfile import TemporaryDirectory
+from typing import cast
 import unittest
 from unittest.mock import patch
 
@@ -514,20 +515,25 @@ worker.join()
                     '  Preserve the trailing spaces and add a regression case.\n  ')
         evidence = f'Issue #{issue}, PR #{pr}, head {new_head}\n\n{implementation}'
         follow_up = f'{repo} issue #{issue}, PR #{pr}, reviewed head {reviewed_head}\n\n{findings}'
-        worker = self.config['workers'][0]
+        launcher = self.home / 'bin' / 'fixture-app'
+        launcher.parent.mkdir()
+        launcher.touch(mode=0o700)
+        wrapper = {'profile_executable': launcher.name}
+        worker = cast(list[dict[str, object]], self.config['workers'])[0]
         worker.update(prompt_file=str(GITHUB_WORKFLOW / 'REVIEWER_PROMPT.md'),
-                      parameters=dict(REPO=None, ISSUE=None, PR=None, HEAD=None, github_identity='fixture-app'))
+                      parameters=dict(REPO=None, ISSUE=None, PR=None, HEAD=None, github_identity=wrapper))
         self.save()
         with patch.object(self.native, 'agent', side_effect=deliver):
             reviewer = self.engine.execute('run', name='worker', prompt=evidence,
                                            parameters=dict(REPO=repo, ISSUE=issue, PR=pr, HEAD=new_head))
             self.assertTrue(reviewer['transcript'].endswith('\n\n' + evidence))
+            self.assertIn(f'{launcher} --repo {repo} gh', reviewer['transcript'])
 
             self.native.result.update(state='done', turn_id='turn')
             self.engine.execute('prepare_panes')
             self.native.rows.remove(self.native.worker)
             worker.update(prompt_file=str(GITHUB_WORKFLOW / 'IMPLEMENTER_PROMPT.md'),
-                          parameters=dict(REPO=None, ISSUE=None, PR=None, TASK=None, github_identity='fixture-app'))
+                          parameters=dict(REPO=None, ISSUE=None, PR=None, TASK=None, github_identity=wrapper))
             self.save()
             implementer = self.engine.execute('run', name='worker',
                                               parameters=dict(REPO=repo, ISSUE=issue, PR=pr, TASK=follow_up))
@@ -535,7 +541,8 @@ worker.join()
 
             self.native.result.update(state='done', turn_id='turn')
             steered = self.engine.execute('steer', pane_id=implementer['pane_id'], prompt=follow_up)
-            self.assertEqual(steered['transcript'], follow_up)
+            self.assertIn(f'github_identity: {launcher}', steered['transcript'])
+            self.assertTrue(steered['transcript'].endswith('\n\n' + follow_up))
 
     def test_run_checks_rendered_utf8_limit_before_provisioning(self):
         parameters = {'TASK': 'Evidence 🧪', 'PR': '34'}
