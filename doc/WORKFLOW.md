@@ -93,7 +93,7 @@ A worker is ready to start when a slot is available, no unresolved launch confli
 
 Immediately before submitting to the bound conversation, recheck the TUI attachment, zoom lock, and gateway state. End the tick if the pane is locked or the conversation has active or pending input. If operator input or zoom changes after the check, one watchdog message can still land in the conversation. If the submission reply is lost, end the tick. On the next tick, check the gateway state again before selecting work.
 
-If the gateway identifies an interrupted watchdog turn as the head of the pending queue after restart, resolve that exact native admission before selecting work. Leave interrupted operator turns for the operator. Worker delivery still follows the pane's acknowledgement state.
+If Hermes reports an `unknown` watchdog admission at the head of the manager queue, resolve it through the gateway before selecting work. Leave unknown operator admissions for the operator. Worker delivery still follows the pane's acknowledgement state.
 
 ## Deliver a worker result
 

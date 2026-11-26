@@ -7,7 +7,7 @@ import unittest
 import yaml
 
 from project_manager_engine.engine import Engine, quota_plan
-from project_manager_engine.hermes_native import WATCHDOG_INPUT, interrupted_watchdog
+from project_manager_engine.hermes_native import WATCHDOG_INPUT, unknown_watchdog_admission
 from project_manager_engine.interface import parse
 from project_manager_engine.settings import Hold, SKILL, Settings, raw_settings
 
@@ -179,7 +179,7 @@ class Contract(unittest.TestCase):
         worker = {'ref': {'session_id': 'bound'}, 'status': 'unknown', 'execution_generation': 2,
                   'input_id': WATCHDOG_INPUT + 'request', 'admission_id': 'head'}
         operator = dict(worker, input_id='operator-input')
-        self.assertIs(interrupted_watchdog({'running': False, 'pending': [worker]}, 'bound'), worker)
-        self.assertIsNone(interrupted_watchdog({'running': True, 'pending': [worker]}, 'bound'))
-        self.assertIsNone(interrupted_watchdog({'running': False, 'pending': [operator, worker]}, 'bound'))
-        self.assertIsNone(interrupted_watchdog({'running': False, 'pending': [worker]}, 'other'))
+        self.assertIs(unknown_watchdog_admission({'running': False, 'pending': [worker]}, 'bound'), worker)
+        self.assertIsNone(unknown_watchdog_admission({'running': True, 'pending': [worker]}, 'bound'))
+        self.assertIsNone(unknown_watchdog_admission({'running': False, 'pending': [operator, worker]}, 'bound'))
+        self.assertIsNone(unknown_watchdog_admission({'running': False, 'pending': [worker]}, 'other'))

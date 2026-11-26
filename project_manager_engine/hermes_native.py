@@ -201,7 +201,7 @@ class Native:
                 if action == 'snapshot':
                     return snapshot
                 if action == 'recover_admission':
-                    row = interrupted_watchdog(snapshot, sid)
+                    row = unknown_watchdog_admission(snapshot, sid)
                     if row is not None:
                         return await gateway.rpc('prompt.resolve_unknown', session_id=sid,
                                                  admission_id=row['admission_id'],
@@ -304,7 +304,7 @@ class Native:
                  'idle' if idle_snapshot(snapshot) else 'working')
         return dict(attached=True, session_id=sid, state=state,
                     pending=[row.get('admission_id') for row in pending] if isinstance(pending, list) else None,
-                    watchdog_interrupted=interrupted_watchdog(snapshot, sid) is not None)
+                    watchdog_admission_unknown=unknown_watchdog_admission(snapshot, sid) is not None)
 
     def verify_manager_target(self, row):
         pane = row['pane_id']
@@ -332,7 +332,7 @@ def idle_snapshot(snapshot):
             and not snapshot.get('prompts') and not snapshot.get('open_requests'))
 
 
-def interrupted_watchdog(snapshot, session_id):
+def unknown_watchdog_admission(snapshot, session_id):
     pending = snapshot.get('pending')
     if snapshot.get('running') is not False or not isinstance(pending, list) or not pending:
         return None

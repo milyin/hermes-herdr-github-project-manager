@@ -380,7 +380,7 @@ class Engine:
         if not raw:
             return None
         row = self.row(raw)
-        if row['lock'] == 'unlocked' and row.get('watchdog_interrupted'):
+        if row['lock'] == 'unlocked' and row.get('watchdog_admission_unknown'):
             try:
                 self.native.recover_manager(row)
             except Hold as exc:
