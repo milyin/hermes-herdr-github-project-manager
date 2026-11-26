@@ -1,1 +1,0 @@
-../workflows/hello-world/MANAGER_PROMPT.md

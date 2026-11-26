@@ -1,1 +1,0 @@
-../workflows/github/MANAGER_PROMPT.md

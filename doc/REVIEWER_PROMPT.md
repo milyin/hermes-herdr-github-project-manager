@@ -1,1 +1,0 @@
-../workflows/github/REVIEWER_PROMPT.md

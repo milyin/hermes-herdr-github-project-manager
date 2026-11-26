@@ -4,6 +4,7 @@ from contextlib import ExitStack, nullcontext
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -13,7 +14,8 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import yaml
 
-from project_manager_engine.settings import SKILL, Settings
+from project_manager_engine.hermes_native import Native
+from project_manager_engine.settings import Hold, SKILL, Settings
 from workflows.github.ensure_github_label import ensure_label
 
 
@@ -40,58 +42,75 @@ class BundledWorkflows(unittest.TestCase):
             for agent in (config['manager'], *config['workers']):
                 agent['working_directory'] = str(self.home)
 
-    def github_prompts(self):
-        self.github['manager']['parameters']['github_identity'] = APP
-        self.github['manager']['parameters']['REPO'] = REPO
-        settings = Settings.read(self.home, self.github)
-        manager, _ = settings.manager.prompt.render()
-        implementer, _ = settings.workers['implementer'].prompt.render(
-            {'github_identity': APP, 'REPO': REPO, 'TASK': 'Implement the issue'})
-        reviewer, _ = settings.workers['reviewer'].prompt.render(
-            {'github_identity': APP, 'REPO': REPO, 'ISSUE': '6', 'PR': '7', 'HEAD': 'a' * 40})
-        return manager, implementer, reviewer
+    def github_settings(self):
+        self.github['manager']['parameters'].update(github_identity=APP, REPO=REPO)
+        return Settings.read(self.home, self.github)
 
     def test_github_example_renders_scoped_commands_for_all_roles(self):
-        manager, implementer, reviewer = self.github_prompts()
+        settings = self.github_settings()
+        command = '/fixture/bin/' + APP
+        setup = {'setup_launcher': command}
+        manager, _ = settings.manager.prompt.render(setup=setup)
+        implementer, _ = settings.workers['implementer'].prompt.render(
+            {'github_identity': APP, 'REPO': REPO, 'TASK': 'Implement the issue'}, setup=setup)
+        reviewer, _ = settings.workers['reviewer'].prompt.render(
+            {'github_identity': APP, 'REPO': REPO, 'ISSUE': '6', 'PR': '7', 'HEAD': 'a' * 40}, setup=setup)
         for prompt in (manager, implementer, reviewer):
-            for action in ('status', 'gh', 'git'):
-                self.assertIn(f'{APP} --repo {REPO} {action}', prompt)
-            self.assertIn(f'{APP}[bot]', prompt)
+            for action in ('gh', 'git'):
+                self.assertIn(f'{command} --repo {REPO} {action}', prompt)
+            self.assertNotIn('merge-reviewed --help', prompt)
             self.assertIn('Do not use personal accounts', prompt)
         self.assertIn(f'Pass `github_identity` as `{APP}` to both workers', manager)
-        self.assertIn('`permissions.contents` is `write`', manager)
+        self.assertIn(f'{command} --repo {REPO} merge-reviewed', manager)
 
-    def test_legacy_profiles_check_launcher_capability_before_status(self):
-        for role in (self.github['manager'], *self.github['workers']):
-            role['prompt_file'] = role['prompt_file'].replace('workflows/github/', 'doc/')
-        launcher = self.home / APP
+    def test_github_prompts_require_an_installed_setup_hook(self):
+        del self.github['setup_hook']
+        with self.assertRaisesRegex(Hold, 'requires a setup_hook'):
+            self.github_settings()
+        self.github['manager']['parameters']['setup_launcher'] = APP
+        with self.assertRaisesRegex(Hold, 'reserved for the setup hook'):
+            self.github_settings()
+
+    def test_setup_hook_checks_launcher_capability_before_status(self):
+        folder = self.home / 'fixture bin'
+        folder.mkdir()
+        launcher = folder / APP
+        calls = self.home / 'calls'
         launcher.write_text('''#!/bin/sh
+printf '%s\\n' "$3" >> "$FIXTURE_CALLS"
 case "$*" in
     "--repo owner/repository merge-reviewed --help")
         case "$FIXTURE_LAUNCHER" in
-            legacy) exit 2 ;;
+            unsupported) exit 2 ;;
             generic-help) printf '%s\\n' 'usage: example-app --repo REPO status' ;;
-            checked-merge) printf '%s\\n' 'usage: example-app merge-reviewed --reviewed-head SHA' ;;
+            *) printf '%s\\n' 'usage: example-app merge-reviewed --reviewed-head SHA' ;;
         esac ;;
-    "--repo owner/repository status") printf '%s\\n' 'fixture status' ;;
+    "--repo owner/repository status") printf '%s\\n' "$FIXTURE_STATUS" ;;
     *) exit 99 ;;
 esac
 ''')
         launcher.chmod(0o700)
-        for role, prompt in zip(('manager', 'implementer', 'reviewer'), self.github_prompts()):
-            preflight = re.search(r'```sh\n(.*?)\n```', prompt, re.DOTALL)
-            self.assertIsNotNone(preflight, role)
-            for capability in ('legacy', 'generic-help', 'checked-merge'):
-                with self.subTest(role=role, capability=capability):
-                    result = subprocess.run(['sh', '-c', preflight[1]], cwd=self.home, capture_output=True,
-                                            text=True, env={'PATH': f'{self.home}{os.pathsep}{os.defpath}',
-                                                           'FIXTURE_LAUNCHER': capability})
-                    if capability == 'checked-merge':
-                        self.assertEqual(result.returncode, 0, result.stderr)
-                        self.assertEqual(result.stdout, 'fixture status\n')
-                    else:
-                        self.assertNotEqual(result.returncode, 0)
-                        self.assertEqual(result.stdout, '')
+        settings = self.github_settings()
+        native = Native(self.home)
+        native.configure(settings)
+        status = dict(authenticated=True, actor=f'{APP}[bot]', repository=REPO, permissions={'contents': 'write'})
+        with patch.dict(os.environ, {'PATH': f'{folder}{os.pathsep}{os.defpath}', 'FIXTURE_CALLS': str(calls),
+                                    'FIXTURE_STATUS': json.dumps(status)}):
+            for capability in ('unsupported', 'generic-help'):
+                with self.subTest(capability=capability), patch.dict(os.environ, {'FIXTURE_LAUNCHER': capability}):
+                    calls.write_text('')
+                    with self.assertRaisesRegex(Hold, 'lacks merge-reviewed support'):
+                        native.setup_environment(settings.manager, str(self.home), settings.manager.prompt.parameters())
+                    self.assertEqual(calls.read_text().splitlines(), ['merge-reviewed'])
+            calls.write_text('')
+            result = native.setup_environment(settings.manager, str(self.home), settings.manager.prompt.parameters())
+            self.assertEqual(result, {'setup_launcher': shlex.quote(str(launcher))})
+            self.assertEqual(calls.read_text().splitlines(), ['merge-reviewed', 'status'])
+            for changes, error in (({'actor': 'different-app[bot]'}, 'Could not verify'),
+                                   ({'permissions': {'contents': 'read'}}, 'requires contents write permission')):
+                with self.subTest(changes=changes), patch.dict(os.environ, {'FIXTURE_STATUS': json.dumps(status | changes)}):
+                    with self.assertRaisesRegex(Hold, error):
+                        native.setup_environment(settings.manager, str(self.home), settings.manager.prompt.parameters())
 
     def test_demo_example_renders_without_github_configuration(self):
         settings = Settings.read(self.home, self.demo)

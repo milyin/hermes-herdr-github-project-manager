@@ -1,1 +1,0 @@
-../workflows/github/IMPLEMENTER_PROMPT.md

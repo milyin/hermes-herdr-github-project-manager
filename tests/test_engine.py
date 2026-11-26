@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import Mock
 
 import yaml
 
@@ -24,6 +25,8 @@ class Dependencies:
                            working_directory=cwd, completed_at='2026-11-26T07:00:00+00:00')
         self.agent_reads = 0
         self.submissions = []
+        self.run_parameters = {'TASK': 'test'}
+        self.steered = []
         self.quota_hold = False
 
     def configure(self, settings):
@@ -53,10 +56,14 @@ class Dependencies:
             return dict(self.result)
         if operation == 'result':
             assert args == ('--turn-id', 'turn')
-            return dict(self.result, message='finished', parameters={'TASK': 'test'})
+            return dict(self.result, message='finished', parameters=self.run_parameters)
         if operation == 'run':
             assert payload['account'] == 'account'
+            self.run_parameters = payload['parameters']
             return dict(status='accepted', thread_id='thread', turn_id='turn')
+        if operation == 'steer':
+            self.steered.append(payload['prompt'])
+            return dict(status='accepted', thread_id='thread', turn_id='next-turn')
         raise AssertionError(operation)
 
     def quota(self, _):
@@ -98,6 +105,16 @@ class Contract(unittest.TestCase):
     def save(self):
         text = yaml.safe_dump({'skills': {'config': {SKILL: self.config}}})
         (self.home / 'config.yaml').write_text(text)
+
+    def configure_hook(self):
+        hook = self.home / 'setup.py'
+        hook.touch()
+        self.config['setup_hook'] = hook.name
+        for name in ('manager', 'worker'):
+            prompt = self.home / f'{name}.md'
+            prompt.write_text(prompt.read_text() + ' using {{setup_command}}')
+        self.save()
+        self.native.setup_environment = Mock(return_value={'setup_command': '/fixture/command'})
 
     def test_render_once_and_reject_invalid_parameters(self):
         worker = Settings.read(self.home, raw_settings(self.home)).workers['worker']
@@ -158,6 +175,43 @@ class Contract(unittest.TestCase):
         self.native.quota_hold = False
         self.assertEqual(self.engine.execute('run', name='worker', parameters={'TASK': 'test'})['pane_id'], 'w1:p2')
         self.assertEqual(self.native.worker['status'], 'I:RUN')
+
+    def test_manager_setup_blocks_preparation_and_turns(self):
+        self.configure_hook()
+        self.native.setup_environment.side_effect = Hold('setup_hook_failed', 'Fixture unavailable')
+        for operation in ('prepare_panes', 'tick'):
+            with self.subTest(operation=operation), self.assertRaisesRegex(Hold, 'Fixture unavailable'):
+                self.engine.execute(operation)
+        self.assertEqual(self.native.submissions, [])
+        self.native.setup_environment.side_effect = None
+        self.native.submit = Mock(return_value={'admission_id': 'manager-turn'})
+        self.assertEqual(self.engine.execute('tick')['admission_id'], 'manager-turn')
+        self.assertIn('workflow value using /fixture/command', self.native.submit.call_args.args[1])
+        self.native.setup_environment.assert_called_with(self.native.settings.manager, str(self.home), {'KEY': 'value'})
+
+    def test_worker_setup_uses_run_inputs_and_gates_followups(self):
+        self.configure_hook()
+        cwd = self.home / 'task checkout'
+        cwd.mkdir()
+        self.native.result['working_directory'] = str(cwd)
+        run = dict(name='worker', parameters={'TASK': 'literal {{PR}}'}, working_directory=str(cwd))
+        self.native.setup_environment.side_effect = Hold('setup_hook_failed', 'Fixture unavailable')
+        with self.assertRaisesRegex(Hold, 'Fixture unavailable'):
+            self.engine.execute('run', **run)
+        self.assertEqual(self.native.rows, [self.native.manager])
+        self.native.setup_environment.side_effect = None
+        started = self.engine.execute('run', **run)
+        parameters = {'TASK': 'literal {{PR}}', 'PR': 'none'}
+        self.native.setup_environment.assert_called_with(self.native.settings.workers['worker'], str(cwd), parameters)
+        self.assertEqual(self.native.run_parameters, parameters | {'setup_command': '/fixture/command'})
+        followup = dict(pane_id=started['pane_id'], prompt='literal {{setup_command}}')
+        self.native.setup_environment.return_value = {'setup_command': '/other/command'}
+        with self.assertRaisesRegex(Hold, 'worker environment changed'):
+            self.engine.execute('steer', **followup)
+        self.assertEqual(self.native.steered, [])
+        self.native.setup_environment.return_value = {'setup_command': '/fixture/command'}
+        self.assertEqual(self.engine.execute('steer', **followup)['turn_id'], 'next-turn')
+        self.assertEqual(self.native.steered, [followup['prompt']])
 
     def test_quota_allows_equality(self):
         reset = '2026-11-26T00:10:00+00:00'

@@ -79,6 +79,27 @@ class Native:
     def configure(self, settings):
         self.settings = settings
 
+    def setup_environment(self, agent, cwd, parameters):
+        hook = self.settings.setup_hook
+        request = dict(agent=agent.name, backend=agent.backend, manager=agent is self.settings.manager,
+                       working_directory=cwd, parameters=parameters)
+        failure = f'Environment setup failed for {agent.name}'
+        try:
+            child = subprocess.run(isolated_python(hook), cwd=cwd, input=json.dumps(request),
+                                   env=dict(os.environ, HERMES_HOME=str(self.home)),
+                                   capture_output=True, encoding='utf-8', timeout=35)
+            reply = json.loads(child.stdout)
+        except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+            raise Hold('setup_hook_failed', failure) from exc
+        if child.returncode:
+            if isinstance(reply, dict) and isinstance(reply.get('error'), str) and reply['error'].strip():
+                failure += ': ' + reply['error']
+            raise Hold('setup_hook_failed', failure)
+        if (not isinstance(reply, dict) or reply.keys() != agent.prompt.setup_keys
+                or any(not isinstance(value, str) or '\0' in value for value in reply.values())):
+            raise Hold('setup_hook_failed', f'Environment setup for {agent.name} returned invalid prompt values')
+        return reply
+
     def script(self, skill, filename):
         skill_dir = self.home / 'skills' / skill
         script = (skill_dir / 'scripts' / filename).resolve()

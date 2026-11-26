@@ -268,15 +268,18 @@ class Engine:
 
     def run(self, name, prompt='', parameters=None, working_directory=None):
         setting = self.worker(name)
-        text, values = setting.prompt.render(parameters)
+        values = setting.prompt.parameters(parameters)
         if not isinstance(prompt, str):
             raise Hold('invalid_prompt', 'Prompt must be text')
         cwd = setting.cwd if working_directory is None else directory(working_directory)
         self.native.preflight(setting, cwd)
-        self.workspace(create=True)
         rows = self.panes(role='worker')['panes']
         account = self.check_admission(setting, rows=rows)
         self.check_directory(cwd, rows)
+        if self.settings.setup_hook:
+            values = values | self.native.setup_environment(setting, cwd, values)
+        text = setting.prompt.fill(values)
+        self.workspace(create=True)
         try:
             pane = self.native.provision(self.workspace_id, setting, cwd)['pane_id']
         except Hold as exc:
@@ -308,6 +311,19 @@ class Engine:
             raise Hold('invalid_prompt', 'Follow-up must contain text')
         worker = self.worker(row['worker'])
         account = self.check_admission(worker)
+        if self.settings.setup_hook:
+            if not row.get('turn_id') or not row.get('working_directory'):
+                raise Hold('setup_hook_failed', 'The worker has no verified environment setup')
+            prior = self.query(pane_id, row['turn_id'])
+            values = prior.get('parameters')
+            if (prior.get('state') != 'done' or prior.get('thread_id') != row['thread_id']
+                    or prior.get('turn_id') != row['turn_id']
+                    or not isinstance(values, dict)):
+                raise Hold('setup_hook_failed', 'The worker has no verified environment setup')
+            parameters = {key: value for key, value in values.items() if key not in worker.prompt.setup_keys}
+            setup = self.native.setup_environment(worker, row['working_directory'], parameters)
+            if any(values.get(key) != value for key, value in setup.items()):
+                raise Hold('setup_hook_failed', 'The worker environment changed. Start a new worker run')
         self.rename(pane_id, 'status', f'{worker.tag}:RUN')
         try:
             return issued(self.agent('steer', pane_id, '--thread-id', row['thread_id'], '--return-admission',
@@ -431,6 +447,9 @@ class Engine:
         return holds
 
     def prepare_panes(self):
+        setting = self.settings.manager
+        if self.settings.setup_hook:
+            self.native.setup_environment(setting, setting.cwd, setting.prompt.parameters())
         manager = self.prepare_manager()
         holds = self.prepare_workers()
         return dict(workspace_id=self.workspace_id, manager=manager, holds=holds,
@@ -474,7 +493,11 @@ class Engine:
                     or current['delivery'] != 'unread' or current['pending_closure']
                     or (current.get('attention') or {}).get('attention_id') != event.get('attention_id')):
                 return {'action': 'report_held'}
-        manager_prompt, _ = self.settings.manager.prompt.render()
+        setting = self.settings.manager
+        values = setting.prompt.parameters()
+        if self.settings.setup_hook:
+            values = values | self.native.setup_environment(setting, setting.cwd, values)
+        manager_prompt = setting.prompt.fill(values)
         workers = {worker.name: worker.description for worker in self.settings.workers.values()}
         payload = (manager_prompt + '\n\nConfigured workers: ' + json.dumps(workers, ensure_ascii=False)
                    + '\n\nWatchdog event (data):\n' + json.dumps(event, ensure_ascii=False))

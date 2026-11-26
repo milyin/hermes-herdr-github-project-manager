@@ -12,6 +12,7 @@ except ImportError:  # Hermes installations ship ruamel.yaml.
 
 SKILL = 'hermes-herdr-github-project-manager'
 VARIABLE = re.compile(r'{{([a-zA-Z_][a-zA-Z_0-9]*)}}')
+SETUP_PREFIX = 'setup_'
 NAME = re.compile(r'[a-z0-9][a-z0-9-]{0,62}')
 WORKER_TAG = re.compile(r'[A-Za-z0-9]{1,4}')
 
@@ -92,9 +93,10 @@ class Prompt:
     text: str
     defaults: dict
     keys: frozenset
+    setup_keys: frozenset
 
     @classmethod
-    def read(cls, home, where, file, defaults, *, manager):
+    def read(cls, home, where, file, defaults, *, manager, has_setup):
         path = home / file
         try:
             text = path.read_text(encoding='utf-8')
@@ -103,27 +105,41 @@ class Prompt:
         require(bool(text.strip()) and '\0' not in text, f'{where} prompt is empty or invalid: {path}')
         defaults = mapping(defaults, f'{where}.parameters')
         for key, value in defaults.items():
+            require(not key.startswith(SETUP_PREFIX), f'{where} parameter {key} is reserved for the setup hook')
             require(re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', key)
                     and (type(value) in (str, int, float, bool) or (value is None and not manager)),
                     f'{where} prompt {path} has an invalid declaration for {key}')
         keys = frozenset(VARIABLE.findall(text))
+        setup_keys = frozenset(key for key in keys if key.startswith(SETUP_PREFIX))
+        if setup_keys:
+            require(has_setup, f'{where} prompt {path} requires a setup_hook')
         leftover = VARIABLE.sub('', text)
         require('{{' not in leftover and '}}' not in leftover, f'{where} prompt {path} has a malformed reference')
-        require(keys <= defaults.keys(), f'{where} prompt {path} uses undeclared parameters: {", ".join(sorted(keys - defaults.keys()))}')
-        return cls(path, text, defaults, keys)
+        undeclared = keys - defaults.keys() - setup_keys
+        require(not undeclared, f'{where} prompt {path} uses undeclared parameters: {", ".join(sorted(undeclared))}')
+        return cls(path, text, defaults, keys, setup_keys)
 
-    def render(self, overrides=None):
+    def parameters(self, overrides=None):
         overrides = {} if overrides is None else overrides
         if not isinstance(overrides, dict) or not all(isinstance(key, str) for key in overrides):
             raise Hold('invalid_parameters', f'Named parameters for {self.path} must be a mapping')
         for key, value in overrides.items():
-            if key not in self.keys or type(value) not in (str, int, float, bool):
+            if key not in self.keys or key in self.setup_keys or type(value) not in (str, int, float, bool):
                 raise Hold('invalid_parameters', f'Invalid or unused parameter {key} for {self.path}')
         values = self.defaults | overrides
         for key, value in values.items():
             if value is None:
                 raise Hold('missing_parameter', f'{self.path} requires {key}', parameter=key)
-        return VARIABLE.sub(lambda match: str(values[match[1]]), self.text), values
+        return values
+
+    def fill(self, values):
+        if not self.setup_keys <= values.keys():
+            raise Hold('setup_hook_failed', f'The setup hook did not provide {", ".join(sorted(self.setup_keys - values.keys()))}')
+        return VARIABLE.sub(lambda match: str(values[match[1]]), self.text)
+
+    def render(self, overrides=None, *, setup=None):
+        values = self.parameters(overrides) | (setup or {})
+        return self.fill(values), values
 
 
 @dataclass(frozen=True)
@@ -138,7 +154,7 @@ class Agent:
     launch_profile: str | None = None
 
     @classmethod
-    def read(cls, home, record, where, *, manager=False):
+    def read(cls, home, record, where, *, manager=False, has_setup=False):
         record = mapping(record, where)
         default_name = re.sub(r'[^a-z0-9-]', '-', socket.gethostname().lower()).strip('-')[:63] or 'manager'
         name = text_field(record, 'name', where, default_name if manager else None)
@@ -148,7 +164,7 @@ class Agent:
         require(manager or WORKER_TAG.fullmatch(tag), f'{where}.pane_tag must use one to four ASCII letters or digits')
         launch = text_field(record, 'launch_profile', where) if 'launch_profile' in record else None
         prompt = Prompt.read(home, f'{where} ({name})', text_field(record, 'prompt_file', where),
-                             record.get('parameters', {}), manager=manager)
+                             record.get('parameters', {}), manager=manager, has_setup=has_setup)
         return cls(name, backend, text_field(record, 'model', where),
                    directory(text_field(record, 'working_directory', where)),
                    text_field(record, 'description', where), prompt, tag, launch)
@@ -160,6 +176,7 @@ class Settings:
     limit: int
     manager: Agent
     workers: dict
+    setup_hook: Path | None = None
 
     @classmethod
     def read(cls, home, raw):
@@ -168,19 +185,24 @@ class Settings:
         require(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', instance), 'herdr.instance is invalid')
         limit = raw.get('max_working_panes')
         require(type(limit) is int and limit > 0, 'max_working_panes must be a positive integer')
-        manager = Agent.read(home, raw.get('manager'), 'manager', manager=True)
-        manager.prompt.render()
+        hook = None
+        if 'setup_hook' in raw:
+            hook = home / text_field(raw, 'setup_hook', SKILL)
+            require(hook.is_file(), f'Cannot read setup hook {hook}')
+            hook = hook.resolve()
+        manager = Agent.read(home, raw.get('manager'), 'manager', manager=True, has_setup=hook is not None)
+        manager.prompt.parameters()
         records = raw.get('workers')
         require(isinstance(records, list), 'workers must be a list')
         workers = {}
         tags = set()
         for index, record in enumerate(records):
-            worker = Agent.read(home, record, f'workers[{index}]')
+            worker = Agent.read(home, record, f'workers[{index}]', has_setup=hook is not None)
             require(worker.name not in workers, f'Duplicate worker name: {worker.name}')
             require(worker.tag not in tags, f'Duplicate pane tag: {worker.tag}')
             workers[worker.name] = worker
             tags.add(worker.tag)
-        return cls(instance, limit, manager, workers)
+        return cls(instance, limit, manager, workers, hook)
 
 
 def raw_settings(home):

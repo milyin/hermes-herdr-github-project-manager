@@ -53,7 +53,7 @@ class GitHubWorkflowPrompt(unittest.TestCase):
         config['manager']['parameters'].update(REPO=REPO, github_identity=APP)
         for agent in (config['manager'], *config['workers']):
             agent['working_directory'] = temporary.name
-        prompt = Settings.read(home, config).manager.prompt.render()[0]
+        prompt = Settings.read(home, config).manager.prompt.render(setup={'setup_launcher': APP})[0]
         procedure = prompt.split('## Merging conditions\n', 1)[1].split('## Worker result\n', 1)[0]
         command = re.search(r'```bash\n(.*?)\n\s*```', procedure, re.DOTALL)[1].replace('\\\n', '')
         self.command = Template(command)

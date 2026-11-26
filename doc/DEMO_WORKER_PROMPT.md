@@ -1,1 +1,0 @@
-../workflows/hello-world/WORKER_PROMPT.md
