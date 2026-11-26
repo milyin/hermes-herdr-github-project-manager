@@ -33,7 +33,7 @@ Use `/project-manager` or Hermes cron history to verify the watchdog. A successf
 ## Setup interview
 
 1. **Choose a workflow.** Present the [bundled workflows](../workflows/README.md) and the option to [create a workflow from scratch](#create-a-workflow). Confirm which workflow the operator wants before following its setup guide. For an existing setup, confirm the saved workflow and preserve the settings the operator wants to keep.
-2. **Confirm the runtime settings.** Show the selected profile's `config.yaml` and its `skills.config.hermes-herdr-github-project-manager` section. Ask which Herdr instance and maximum number of working panes to use. Offer `default` and `1`. Confirm the manager and worker names, descriptions, models, existing absolute working directories, worker backends and pane tags. Confirm any supported launch profiles.
+2. **Confirm the runtime settings.** Show the selected profile's `config.yaml` and its `skills.config.hermes-herdr-github-project-manager` section. Ask which Herdr instance and maximum number of working panes to use. Offer `default` and `1`. Confirm the manager and worker names, descriptions, models, existing absolute working directories, worker backends and pane tags. Confirm any supported reasoning efforts and launch profiles.
 3. **Follow the selected workflow's guide.** Collect its prompt paths and parameters and run the setup checks it requires in the execution environments it uses. Show blockers to the operator before saving.
 4. **Save and verify.** Confirm the configuration with the operator and update only the project-manager settings section in the selected profile's `config.yaml`. Ask the operator to run `/project-manager` to validate the settings, prepare the manager pane and check watchdog registration.
 
@@ -47,10 +47,13 @@ Use `/project-manager` or Hermes cron history to verify the watchdog. A successf
 ## Settings
 
 - Each worker has a unique `name`, a unique `pane_tag`, an `agent` supported by the interactive agent-manager API, a `model`, a `description`, and a `prompt_file`. The first supported worker backend is Codex. Use lowercase letters, digits and hyphens in worker names. Give each worker either an existing absolute `working_directory` or a [managed work root](#managed-worker-directories).
+- `reasoning_effort` optionally sets a new Codex worker's thinking level. Set it next to `model` in the worker record. Use a value advertised by that model, such as `high`. Omit the setting to start with Codex's usual configuration.
 - `pane_tag` is a string of one to four ASCII letters or digits, such as `I`. Quote a tag that contains only digits. The engine prefixes the worker's pane status with this tag.
-- `manager` has the same fields except `agent` and `pane_tag`. The manager always runs Hermes in the TUI and uses the configured `model` in its gateway session. If the manager name is omitted, setup uses the local hostname.
+- `manager` has the same fields except `agent`, `pane_tag`, and `reasoning_effort`. The manager always runs Hermes in the TUI and uses the configured `model` in its gateway session. If the manager name is omitted, setup uses the local hostname.
 - `launch_profile` is an optional execution profile name. For Codex workers it selects a native Codex profile for both the app server and the TUI. Select a profile with the access your workflow requires. A manager execution profile requires Hermes to support per-session application and verification. The backend refuses a requested launch profile it cannot apply.
 - `max_working_panes` is a positive integer. It counts workers that are starting, running, blocked or suspended mid-turn, possibly still running, or whose pane is locked or has an unverified lock. The manager pane, quota receiver and verified unlocked finished workers are outside that count.
+
+The project manager rereads and validates `config.yaml` for each command. The next `run` starts a new worker with the saved `model` and `reasoning_effort`. A follow-up uses the settings of the worker's existing pane. The agent manager's preflight reports an unsupported model and effort combination before a new pane is created. Setting `reasoning_effort` requires [agent-manager launch support](WORKFLOW.md#herdr-agent-manager). The project manager returns `launch_reasoning_effort_unavailable` if the installed agent manager lacks launch support.
 
 ## Managed worker directories
 

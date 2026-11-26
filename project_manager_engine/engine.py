@@ -314,7 +314,8 @@ class Engine:
 
     def workers(self):
         return {'workers': [dict(name=worker.name, pane_tag=worker.tag, description=worker.description,
-                                 agent=worker.backend, model=worker.model, parameters=worker.prompt.defaults,
+                                 agent=worker.backend, model=worker.model, reasoning_effort=worker.reasoning_effort,
+                                 parameters=worker.prompt.defaults,
                                  required=sorted(k for k, v in worker.prompt.defaults.items() if v is None))
                             for worker in self.settings.workers.values()]}
 

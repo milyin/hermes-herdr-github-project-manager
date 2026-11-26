@@ -11,7 +11,7 @@ import yaml
 
 from project_manager_engine.engine import Engine, quota_plan
 from project_manager_engine.hermes_native import Native, WATCHDOG_INPUT, unknown_watchdog_admission
-from project_manager_engine.interface import parse
+from project_manager_engine.interface import outcome, parse
 from project_manager_engine.settings import Hold, SKILL, Settings, raw_settings
 
 
@@ -140,6 +140,78 @@ class Contract(unittest.TestCase):
     def save(self):
         text = yaml.safe_dump({'skills': {'config': {SKILL: self.config}}})
         (self.home / 'config.yaml').write_text(text)
+
+    def test_new_worker_starts_with_latest_model_and_reasoning_effort(self):
+        self.managed_root()
+        worker = self.config['workers'][0]
+        worker['reasoning_effort'] = 'high'
+        self.save()
+        with (patch.object(self.native, 'preflight', wraps=self.native.preflight) as preflight,
+              patch.object(self.native, 'provision', wraps=self.native.provision) as provision,
+              patch.object(self.native, 'agent', wraps=self.native.agent) as agent):
+            self.managed_run(prompt='First task')
+            self.finish_managed()
+            worker.update(model='new-model', reasoning_effort='medium')
+            self.save()
+            self.engine.execute('steer', pane_id='w1:p2', prompt='Continue existing work')
+            self.close_managed()
+            self.managed_run(prompt='Next task')
+
+        expected = [('test', 'high'), ('new-model', 'medium')]
+        self.assertEqual([(call.args[0].model, call.args[0].reasoning_effort) for call in preflight.call_args_list],
+                         expected)
+        self.assertEqual([(call.args[1].model, call.args[1].reasoning_effort) for call in provision.call_args_list],
+                         expected)
+        followup = next(call for call in agent.call_args_list if call.args[0] == 'steer')
+        self.assertEqual(followup.kwargs['payload'], {'prompt': 'Continue existing work', 'account': 'account'})
+
+    def test_invalid_config_reports_setting_and_prevents_turn(self):
+        worker = self.config['workers'][0]
+        worker['reasoning_effort'] = ['high']
+        self.save()
+        result = outcome(self.home, 'run', {'name': 'worker'})
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['error']['code'], 'invalid_config')
+        self.assertIn('workers[0].reasoning_effort must be nonempty text', result['error']['message'])
+
+        worker['reasoning_effort'] = 'unknown'
+        self.save()
+        message = "reasoning_effort 'unknown' is unsupported by model 'test'"
+        with patch.object(self.native, 'preflight', side_effect=Hold('invalid_config', message)):
+            with self.assertRaisesRegex(Hold, message) as error:
+                self.managed_run()
+        self.assertEqual(error.exception.code, 'invalid_config')
+        self.assertEqual(self.native.rows, [self.native.manager])
+
+        for content, message in (('skills: [', 'Invalid YAML'), ('skills: false', 'skills must be a mapping')):
+            with self.subTest(content=content):
+                (self.home / 'config.yaml').write_text(content)
+                result = outcome(self.home, 'steer', {'pane_id': 'w1:p2', 'prompt': 'Invalid config'})
+                self.assertEqual(result['error']['code'], 'invalid_config')
+                self.assertIn(message, result['error']['message'])
+
+    def test_native_checks_and_passes_effort_to_worker_launch(self):
+        self.config['workers'][0]['reasoning_effort'] = 'high'
+        self.config['workers'][0]['launch_profile'] = 'profile'
+        self.save()
+        worker = Settings.read(self.home, raw_settings(self.home)).workers['worker']
+        native = Native(self.home)
+        with patch.object(native, 'agent') as agent:
+            native.preflight(worker, worker.cwd)
+            native.provision('w1', worker, worker.cwd)
+        preflight, provision = agent.call_args_list
+        self.assertEqual((preflight.args[0], provision.args[0]), ('preflight', 'provision'))
+        for call in (preflight, provision):
+            self.assertEqual(call.args[-3:], ('--launch-profile', 'profile', '--reasoning-effort=high'))
+
+    def test_legacy_agent_manager_reports_missing_launch_effort_support(self):
+        native = Native(self.home)
+        argv = ['preflight', '--reasoning-effort=high']
+        legacy = CompletedProcess(argv, 2, '', 'agent_manager.py: error: unrecognized arguments: --reasoning-effort=high\n')
+        with patch('project_manager_engine.hermes_native.subprocess.run', return_value=legacy):
+            with self.assertRaises(Hold) as error:
+                native.invoke(argv)
+        self.assertEqual(error.exception.code, 'launch_reasoning_effort_unavailable')
 
     def managed_root(self):
         root = self.home / 'managed'

@@ -37,8 +37,16 @@ def register(ctx):
     def active():
         return get_hermes_home().resolve() == home and raw_settings(home).get('enabled') is True
 
-    def bound(session_id):
-        return bool(session_id and active() and Native(home).binding.get('session_id') == session_id)
+    def bound(session_id, *, allow_invalid=False):
+        if (not session_id or get_hermes_home().resolve() != home
+                or Native(home).binding.get('session_id') != session_id):
+            return False
+        try:
+            return raw_settings(home).get('enabled') is True
+        except Hold:
+            if allow_invalid:
+                return True
+            raise
 
     def command(text, **_):
         try:
@@ -58,7 +66,7 @@ def register(ctx):
     def make_handler(operation):
         def handler(args, session_id=None, **_):
             try:
-                authorized = bound(session_id)
+                authorized = bound(session_id, allow_invalid=True)
             except Hold:
                 authorized = False
             if not authorized:
@@ -71,7 +79,9 @@ def register(ctx):
         try:
             return raw_settings(home).get('enabled') is True
         except Hold:
-            return False
+            with suppress(Hold):
+                return bool(Native(home).binding.get('session_id'))
+        return False
 
     for operation, (description, required, properties) in TOOLS.items():
         name = f'project_manager_{operation}'
@@ -91,7 +101,7 @@ def register(ctx):
 
     def restrict_tools(request, session_id=None, **_):
         with suppress(Hold):
-            if bound(session_id):
+            if bound(session_id, allow_invalid=True):
                 return None
         schemas = request.get('tools')
         if isinstance(schemas, list):
