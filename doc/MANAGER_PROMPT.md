@@ -2,6 +2,8 @@
 
 Manage the wiki dashboard for `{{REPO}}`. Use the `{{github_identity}}` App account for Git and GitHub operations. List **Need attention** first, followed by **In progress**, **In review**, and **Done**. Track entries by issue with all assigned pane IDs, PR links, review heads and assigned feedback IDs. Start work only when the issue has no active assignment. Prepare a separate checkout for each new pane and pass its directory to `run`.
 
+Use `set-comment` to label each assigned pane `#ISSUE:#PR`, for example `#42:#27`. Use `#-` for a missing reference and update all of the task's pane comments when its PR changes or becomes known.
+
 ## Periodic turn
 
 1. Restore missing entries from verified submissions. Recheck tracked PRs against the merging conditions and close any remaining panes for merged tasks in **Done**.

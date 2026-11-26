@@ -36,6 +36,7 @@ skills:
           github_identity: milyin-hermes
       workers:
         - name: implementer
+          pane_tag: I
           agent: codex
           model: YOUR_CODEX_MODEL
           working_directory: /absolute/path/to/implementer-checkout
@@ -48,6 +49,7 @@ skills:
             TASK: null
             github_identity: milyin-hermes
         - name: reviewer
+          pane_tag: R
           agent: codex
           model: YOUR_CODEX_MODEL
           working_directory: /absolute/path/to/reviewer-checkout
@@ -63,8 +65,9 @@ skills:
 
 For this example, `github_identity` tells the manager and workers to use the `milyin-hermes` App account. It is a prompt parameter. The workflow reports authentication or push failures as blockers for the operator.
 
-- Each worker has a unique `name`, an `agent` supported by Herdr agent manager, a `model`, an existing absolute `working_directory`, a `description`, and a `prompt_file`. Use lowercase letters, digits and hyphens in worker names. The working directory is the default for `run`. A workflow can supply a separate directory for each pane it retains.
-- `manager` has the same fields except `agent`. The manager always runs Hermes in the TUI and uses the configured `model` in its gateway session. If the manager name is omitted, setup uses the local hostname.
+- Each worker has a unique `name`, a `pane_tag`, an `agent` supported by Herdr agent manager, a `model`, an existing absolute `working_directory`, a `description`, and a `prompt_file`. Use lowercase letters, digits and hyphens in worker names. The working directory is the default for `run`. A workflow can supply a separate directory for each pane it retains.
+- `pane_tag` is a string of one to four ASCII letters or digits, such as `I` for implementer and `R` for reviewer. Quote a tag that contains only digits. The engine prefixes the worker's pane status with this tag.
+- `manager` has the same fields except `agent` and `pane_tag`. The manager always runs Hermes in the TUI and uses the configured `model` in its gateway session. If the manager name is omitted, setup uses the local hostname.
 - `launch_profile` is an optional execution profile name. The agent manager applies it to workers, and the gateway integration applies it to the manager session's tool processes. Refuse the launch if the requested execution profile cannot be applied.
 - `max_working_panes` is a positive integer. It counts workers that are starting, running, blocked or suspended mid-turn, possibly still running, or whose pane is locked or has an unverified lock. The manager pane, quota receiver and verified unlocked finished workers are outside that count.
 
