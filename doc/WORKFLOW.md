@@ -144,7 +144,7 @@ Send a `worker_attention` event with `worker`, `pane_id`, `turn_id`, `attention_
 
 Count working or possibly working panes against the worker limit, including zoom-locked panes. An unlocked idle `READ` pane leaves a slot available for another run. `steer` on an idle pane requires a free slot, regardless of its delivery state. Reserve capacity atomically with automated worker admission. Operator turns remain interactive and count against subsequent automated admissions, even when manual activity takes usage above the limit.
 
-Use separate working directories for retained panes that the operator can reactivate. `run` accepts a directory chosen by the workflow and uses the configured default when omitted. Validate the resolved directory at launch and refuse a conflicting use of the same directory. The workflow prepares any project-specific checkout before invoking `run`.
+Use separate working directories for retained panes that the operator can reactivate. `run` accepts a directory chosen by the workflow. When omitted, the engine uses the configured working directory or allocates a fresh subdirectory of the worker's [managed work root](PROFILE.md#managed-worker-directories). The workflow prepares any project-specific checkout it supplies to `run` and owns its lifecycle.
 
 On each tick, read valid rate-limit windows from the agent manager for each distinct account used by configured Codex workers. An account-only probe can read windows without opening a worker pane or sending a prompt. The worker receiver verifies a fresh reading for that same account before accepting a turn. When there are no Codex workers, the Codex quota check is skipped.
 
