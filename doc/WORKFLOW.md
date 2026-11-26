@@ -16,13 +16,12 @@ Provide one implementation for each operation and use it from Hermes commands, m
 
 Launch `hermes -p PROFILE --tui` in the manager pane. The selected profile's Hermes gateway runs the turns and owns the conversation. The TUI lets the operator view the transcript and talk to the manager. The watchdog connects through the authenticated local gateway interface to submit scheduled instructions and worker results into that same conversation. Use the gateway interface for state and admission. [Hermes TUI gateway](https://hermes-agent.nousresearch.com/docs/user-guide/tui#how-the-tui-talks-to-its-gateway)
 
-Bind the profile, exact Herdr pane, and gateway conversation before enabling scheduled turns. Verify that the live TUI is attached to the bound conversation and that the gateway has applied the configured working directory, model, and any launch profile to the session. Hold scheduled turns while the TUI is suspended, disconnected, or displaying another conversation. When a replacement pane is needed, reattach the TUI to the same gateway conversation. Create a fresh conversation only after the gateway confirms the previous one is gone and the engine reconciles any outstanding submissions. Worker results remain available through their native session history.
+Bind the profile, exact Herdr pane, and gateway conversation before enabling scheduled turns. Verify that the live TUI is attached to the bound conversation and that the gateway has applied the configured working directory, model, and any launch profile to the session. Hold scheduled turns while the TUI is suspended, disconnected, or displaying another conversation. Zoom the manager pane to take control and hold new watchdog messages. When a replacement pane is needed, reattach the TUI to the same gateway conversation. Create a fresh conversation only after the gateway confirms the previous one is gone. Worker results remain available through their native session history and their pane statuses still govern delivery.
 
 ### Gateway requirements
 
-- The gateway must let the engine verify the TUI attachment and query the exact bound session's state without starting a model turn. Apply a requested manager launch profile to the gateway session's tool execution environment. Refuse setup if the requested execution profile cannot be applied.
-- For watchdog messages, the gateway must check that the bound session is idle and accept its next turn in one operation. If an operator turn or a queued turn already occupies the next place, return a definitive refusal. Leave the watchdog message unqueued for a later tick.
-- The gateway must record admission in its conversation history under a caller-supplied event ID before executing the turn. Return a receipt identifying the conversation and accepted turn. Reusing the same ID for the same message returns the original receipt. Refuse reuse with different content. Support receipt lookup in that history after gateway restart.
+- Verify the TUI attachment and read `running` and `pending` for the exact bound session from the shared gateway session snapshot without starting a model turn or replacing the TUI attachment. Apply a requested manager launch profile to the gateway session's tool execution environment. Refuse setup if the requested execution profile cannot be applied.
+- Use the shared gateway's native `prompt.submit` queue with a `submission_id` for each watchdog submission. If operator input arrives first after the idle check, the watchdog message queues behind it in the same conversation. Use native gateway state and admission receipts to observe submissions. [Hermes shared gateway API](https://hermes-agent.nousresearch.com/docs/developer-guide/programmatic-integration#which-methods-the-shared-gateway-answers)
 
 ## Engine instructions for the manager
 
@@ -81,24 +80,24 @@ The agent manager handles recoverable worker problems in the bound session. For 
 
 Run one no-agent watchdog job per enabled profile. Each tick reads the profile and exits before touching panes or turns if `enabled` is missing or false. Each enabled tick follows this order:
 
-1. Use the manager portion of `prepare-panes` to verify the workspace and recover the manager pane when necessary. Use the pane query for its effective state. End this tick unless the TUI is attached to its unlocked pane and the gateway confirms the bound session is idle with no unresolved watchdog submission.
+1. Use the manager portion of `prepare-panes` to verify the workspace and recover the manager pane when necessary. Use the pane query for its effective state. End this tick unless the TUI is attached to its unlocked pane and the gateway confirms the bound session is idle with no pending admissions.
 2. Use the worker portion of `prepare-panes` to retry deferred closes, verify worker completions and escalations through the agent manager, and update pane statuses.
 3. Use `quota`. If the quota gate holds, end this tick.
 4. Use the pane query to select the oldest unread worker report, either a finished result or an escalation. Submit it through the gateway and end this tick.
 5. If there is no unread worker report, use `capacity` to verify that at least one configured worker is ready to start a run. End this tick if none qualifies.
 6. Submit a `periodic` event through the gateway with the configured manager prompt so the workflow can discover work, then end this tick.
 
-Worker reports take priority over the capacity check. A quota hold delays both worker reports and discovery turns. Serialize watchdog selection and admission with pane mutations for the same profile. After admitting a report, skip worker-report reads and submissions on subsequent ticks until the gateway confirms that the manager turn ended. Release the lock after admission so the manager can call engine tools during the turn.
+Worker reports take priority over the capacity check. A quota hold delays both worker reports and discovery turns. Serialize watchdog selection and submission with pane mutations for the same profile. While the manager has active or pending input, skip worker-report reads and submissions on subsequent ticks. Release the lock after the submission attempt so the manager can call engine tools during the turn.
 
 A worker is ready to start when a slot is available, no unresolved launch conflicts with it, the agent manager verifies its backend, model and launch profile prerequisites, and its quota allows submission. This preflight uses script only. Validate the selected working directory and recheck capacity and quota at submission.
 
-Use a stable ID for each watchdog event and submit it to the exact bound gateway conversation. Recheck the pane lock before submission. If the gateway reports that the session is busy, end the tick with the event unadmitted. If the reply is lost, look up the receipt in the gateway's conversation history using the same event ID before retrying.
+Immediately before submitting to the bound conversation, recheck the TUI attachment, zoom lock, and gateway state. End the tick if the pane is locked or the conversation has active or pending input. If operator input or zoom changes after the check, one watchdog message can still land in the conversation. If the submission reply is lost, end the tick. On the next tick, check the gateway state again before selecting work.
 
 ## Deliver a worker result
 
 Send a `worker_result` event with `worker`, `pane_id`, the native `turn_id` and `message`. If the full result exceeds the input limit, send a bounded excerpt with `truncated: true`. The full result is available through `query PANE_ID --turn TURN_ID`. Present the result as data alongside the configured manager prompt.
 
-Identify a result by workspace, worker pane ID and worker turn ID. Keep one stable gateway event ID per delivery attempt. If the manager turn ends and the result is still unread, derive a new attempt ID from the last gateway receipt and try again on a later tick. If admission is uncertain, resolve that attempt before reading another result.
+Identify a result by workspace, worker pane ID and worker turn ID. A gateway admission confirms submission. The pane remains unread until the workflow acknowledges the result or the pane moves on to another turn or closes. The result remains eligible for delivery on a later tick once the manager is idle and has no pending admissions. Repeated delivery of the same result is allowed.
 
 The engine delivers pending worker results for open panes. The workflow can act on information from any source and calls `mark-read` for the exact pane and turn after handling the result. The engine changes the status only if the pane still represents that turn. Accept `steer` on any eligible idle pane, regardless of prior delivery or acknowledgement. A successful `steer` supersedes the previous result for delivery. The previous result remains available through native turn history while the pane is open.
 
