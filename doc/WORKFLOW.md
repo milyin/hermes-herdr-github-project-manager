@@ -4,7 +4,7 @@ This specification defines the target behavior. [Profile settings](PROFILE.md) d
 
 ## Workflow and engine
 
-The **workflow** is the set of user-selected manager and worker prompts. It defines how to find work, assign it, act on results, and track project progress. It chooses its own data sources, services, and storage. The [GitHub workflow](MANAGER_PROMPT.md) is an example that uses a wiki dashboard. Other workflows can use different project data and storage.
+The **workflow** is the set of user-selected manager and worker prompts. It defines how to find work, assign it, act on results, and track project progress. It chooses its own data sources, services, and storage. The [bundled workflows](../workflows/README.md) show how to apply these contracts to different kinds of work.
 
 The **engine** is the project-agnostic part of the installable skill and plugin. It renders prompts, prepares panes, tracks turns, enforces quota and concurrency, and delivers worker results. Its input contract treats prompt text, parameters, pane comments, and results as opaque data. Herdr's live pane list is the source of truth for which worker panes the engine tracks. Each pane label's status field holds its delivery state. The engine retains the manager's conversation and exact Herdr binding so it can reopen the same conversation when its pane is replaced. The engine reads worker bindings, exact turns, results, and receipts through the dependency APIs.
 

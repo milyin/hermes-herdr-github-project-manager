@@ -1,11 +1,14 @@
-"""Exercise the bundled prompt's read-only approval check without GitHub."""
+"""Run the rendered GitHub workflow merge command with isolated API fixtures."""
 
 from contextlib import redirect_stdout
+from copy import deepcopy
 from io import StringIO
 import json
+import os
 from pathlib import Path
 import re
-import subprocess
+import shlex
+from string import Template
 import sys
 from tempfile import TemporaryDirectory
 import unittest
@@ -14,6 +17,7 @@ from unittest.mock import patch
 import yaml
 
 from project_manager_engine.settings import SKILL, Settings
+from workflows.github.github_app import GitHubError, main
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,7 +25,12 @@ REPO = 'owner/repository'
 APP = 'fixture-app'
 HEAD = 'a' * 40
 OLD = 'b' * 40
-WAITING = 'Awaiting human approval'
+MERGE_SHA = 'c' * 40
+WAITS = 'Awaiting human approval'
+PR = '/repos/owner/repository/pulls/14'
+PERMISSION = '/repos/owner/repository/collaborators/reviewer/permission'
+RULES = '/repos/owner/repository/rules/branches/main?per_page=100&page=1'
+REVIEWS = PR + '/reviews?per_page=100&page=1'
 REVIEWER = {'login': 'reviewer', 'id': 2, 'type': 'User'}
 AUTHOR = {'login': 'author', 'id': 1, 'type': 'User'}
 
@@ -31,117 +40,210 @@ def review(state='APPROVED', *, number=1, head=HEAD, user=REVIEWER):
 
 
 class GitHubWorkflowPrompt(unittest.TestCase):
-    pull = ('pr', 'view', '14', '--repo', REPO, '--json', 'author,headRefOid,isDraft,state')
-    reviews = ('api', f'repos/{REPO}/pulls/14/reviews?per_page=100',
-               '--method', 'GET', '--paginate', '--slurp')
-    permission = ('api', f'repos/{REPO}/collaborators/reviewer/permission', '--method', 'GET')
-
     def setUp(self):
         temporary = TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         home = Path(temporary.name)
         (home / 'skills').mkdir()
         (home / 'skills' / SKILL).symlink_to(ROOT, target_is_directory=True)
-        docs = (ROOT / 'doc' / 'PROFILE.md').read_text(encoding='utf-8')
-        github = yaml.safe_load(re.search(r'```yaml\n(.*?)\n```', docs, re.DOTALL)[1])
+        guide = (ROOT / 'workflows' / 'github' / 'README.md').read_text(encoding='utf-8')
+        github = yaml.safe_load(re.search(r'```yaml\n(.*?)\n```', guide, re.DOTALL)[1])
         config = github['skills']['config'][SKILL]
         config['manager']['parameters'].update(REPO=REPO, github_identity=APP)
         for agent in (config['manager'], *config['workers']):
             agent['working_directory'] = temporary.name
-        self.prompt = Settings.read(home, config).manager.prompt.render()[0]
-        script = self.prompt.split("<<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
-        self.approval_check = compile(script, 'doc/MANAGER_PROMPT.md', 'exec')
-        self.pr = dict(author=AUTHOR, headRefOid=HEAD, isDraft=False, state='OPEN',
-                       mergeable='MERGEABLE', mergeStateStatus='CLEAN', reviewDecision='')
-        self.responses = {
-            self.pull: self.pr,
-            self.reviews: [[]],
-            self.permission: dict(permission='write', user=REVIEWER),
-        }
+        prompt = Settings.read(home, config).manager.prompt.render()[0]
+        procedure = prompt.split('## Merging conditions\n', 1)[1].split('## Worker result\n', 1)[0]
+        command = re.search(r'```bash\n(.*?)\n\s*```', procedure, re.DOTALL)[1].replace('\\\n', '')
+        self.command = Template(command)
+        self.procedure = procedure
+        config_path = home / 'herdr-project-manager' / 'github' / f'{APP}.json'
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text(json.dumps(dict(app_slug=APP, app_id=77, repository=REPO,
+                                               private_key=str(home / 'app.pem'))))
+        config_path.chmod(0o600)
+        self.env = patch.dict(os.environ, {'XDG_CONFIG_HOME': str(home)})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.pull = dict(author=AUTHOR, headRefOid=HEAD, isDraft=False, state='OPEN', baseRefName='main',
+                         autoMergeRequest=None, isInMergeQueue=False, isMergeQueueEnabled=False,
+                         mergeable='MERGEABLE',
+                         mergeStateStatus='CLEAN', reviewDecision=None)
+        self.settings = dict(nameWithOwner=REPO, mergeCommitAllowed=True, squashMergeAllowed=True,
+                             rebaseMergeAllowed=False, pullRequest=self.pull)
+        self.first = [review()]
+        self.final = None
+        self.rules = []
+        self.permission = dict(permission='write', user=REVIEWER)
+        self.on_permission = lambda: None
+        self.merge_response = dict(merged=True, sha=MERGE_SHA)
         self.calls = []
+        self.review_reads = 0
 
-    def github(self, command, **kwargs):
-        self.assertEqual(command[:4], [APP, '--repo', REPO, 'gh'])
-        request = tuple(command[4:])
-        self.calls.append(request)
-        self.assertIn(request, self.responses, f'Unexpected call, including a merge write: {request}')
-        response = self.responses[request]
-        if isinstance(response, Exception):
-            raise response
-        return json.dumps(response).encode()
+    def request(self, method, path, token, data=None):
+        self.calls.append((method, path, data))
+        bootstrap = {
+            '/app': {'id': 77, 'slug': APP},
+            f'/repos/{REPO}/installation': {'id': 42, 'app_id': 77, 'account': {'login': 'owner'}},
+            '/app/installations/42/access_tokens': {
+                'token': 'installation-fixture-token', 'expires_at': '2026-11-26T11:00:00Z',
+                'permissions': {'contents': 'write'},
+            },
+            f'/repos/{REPO}': {'full_name': REPO},
+            f'/users/{APP}%5Bbot%5D': {'id': 70, 'login': f'{APP}[bot]', 'type': 'Bot'},
+        }
+        if path in bootstrap:
+            return bootstrap[path], ''
+        self.assertEqual(token, 'installation-fixture-token')
+        if path == '/graphql' and method == 'POST':
+            self.assertEqual(data['variables'], {'owner': 'owner', 'name': 'repository', 'number': 14})
+            self.assertIn('isInMergeQueue isMergeQueueEnabled', data['query'])
+            return {'data': {'repository': deepcopy(self.settings)}}, ''
+        if path == RULES and method == 'GET':
+            return self.rules, ''
+        if path == REVIEWS and method == 'GET':
+            self.review_reads += 1
+            evidence = self.first if self.review_reads == 1 or self.final is None else self.final
+            if isinstance(evidence, Exception):
+                raise evidence
+            return evidence, ''
+        if path == PERMISSION and method == 'GET':
+            self.on_permission()
+            return self.permission, ''
+        if path == PR + '/merge' and method == 'PUT':
+            if isinstance(self.merge_response, Exception):
+                raise self.merge_response
+            return self.merge_response, ''
+        self.fail(f'Unexpected GitHub call {method} {path}')
 
-    def check(self, github=None):
+    def run_command(self, *, worker='clean', clear=True, head=HEAD, humans='reviewer author', method='squash'):
+        template = self.command.substitute(pr_number='14', reviewed_head=head, verified_human_logins=humans,
+                                           merge_method=method)
+        launcher, *args = shlex.split(template)
+        self.assertEqual(launcher, APP)
+        if worker is None:
+            index = args.index('--worker-verdict')
+            del args[index:index + 2]
+        else:
+            args[args.index('--worker-verdict') + 1] = worker
+        if not clear:
+            args.remove('--feedback-clear')
+        self.review_reads = 0
         self.calls.clear()
         stdout = StringIO()
-        with patch.object(sys, 'argv', ['-', '14', HEAD, 'reviewer author']), redirect_stdout(stdout), patch(
-                'subprocess.check_output', side_effect=github or self.github):
-            exec(self.approval_check, {})
+        with (patch.object(sys, 'argv', [APP]), redirect_stdout(stdout),
+              patch('workflows.github.github_app.jwt', return_value='app-proof'),
+              patch('workflows.github.github_app.request', side_effect=self.request)):
+            self.assertEqual(main(args), 0)
         return json.loads(stdout.getvalue())
 
-    def test_rendered_workflow_requires_fresh_approval_before_direct_sha_pinned_merge(self):
-        procedure = self.prompt.split('## Merging conditions\n', 1)[1].split('### Human approval check\n', 1)[0]
-        write = procedure.index(f'{APP} --repo {REPO} gh api --method PUT')
-        conditions = procedure[:write]
-        for required in ('clean worker verdict', 'no outstanding actionable feedback', 'GitHub rules and required checks',
-                         'Immediately before merging', '**Human approval verified** for the exact reviewed SHA',
-                         'even if GitHub requires zero approvals', '**Awaiting human approval** under **Need attention**',
+    def assert_hold(self, status='Need attention', **options):
+        self.assertEqual(self.run_command(**options)['status'], status)
+        self.assertFalse(any(method in {'PUT', 'PATCH', 'DELETE'} for method, _, _ in self.calls))
+
+    def test_rendered_workflow_and_qualifying_write(self):
+        for required in ('clean verdict', 'no outstanding actionable feedback', 'required checks',
+                         'even if GitHub requires zero approvals', 'after checking collaborator access',
                          'Leave auto-merge and queue admission to the operator'):
-            self.assertIn(required, conditions)
-        self.assertIn(f'"repos/{REPO}/pulls/${{pr_number}}/merge"', procedure[write:])
-        self.assertIn('--raw-field "sha=${reviewed_head}"', procedure[write:])
+            self.assertIn(required, self.procedure)
+        self.assertEqual(self.run_command(), dict(status='Merged', head=HEAD, merge_sha=MERGE_SHA))
+        self.assertEqual([(method, path) for method, path, _ in self.calls[-8:]], [
+            ('POST', '/graphql'), ('GET', RULES), ('GET', REVIEWS), ('GET', PERMISSION),
+            ('POST', '/graphql'), ('GET', RULES), ('GET', REVIEWS), ('PUT', PR + '/merge'),
+        ])
+        self.assertEqual(self.calls[-1][2], {'sha': HEAD, 'merge_method': 'squash'})
+        self.assertEqual(self.calls[2], ('POST', '/app/installations/42/access_tokens', {'repositories': ['repository']}))
 
-    def test_unprotected_pr_with_green_checks_and_zero_reviews_waits(self):
-        self.assertEqual(self.check(), {'status': WAITING})
-        self.assertEqual(self.calls, [self.pull, self.reviews])
+    def test_holds_without_confirmed_worker_evidence_or_clear_feedback(self):
+        for options in ({'worker': 'changes_requested'}, {'worker': None}, {'clear': False}, {'head': HEAD[:7]}):
+            with self.subTest(options=options):
+                self.assert_hold(**options)
+                self.assertNotIn('/graphql', [path for _, path, _ in self.calls])
 
-    def test_invalid_review_evidence_waits(self):
-        for evidence in (
-            [[review(head=OLD)]],
-            [[review(user=AUTHOR)]],
-            [[review(user=dict(REVIEWER, type='Bot'))]],
-            [[review('PENDING')]],
-            [[review()], [review('DISMISSED', number=2)]],
-            [[review()], [review('DISMISSED', number=2, user={'id': REVIEWER['id']})]],
-            [[dict(review(), submitted_at=None)]],
-            [[review()], {}],
-            subprocess.CalledProcessError(1, self.reviews),
+    def test_holds_for_each_unready_github_state(self):
+        cases = [
+            {'state': 'CLOSED'}, {'isDraft': True}, {'mergeable': 'CONFLICTING'},
+            {'mergeStateStatus': 'UNSTABLE'}, {'mergeStateStatus': 'BLOCKED'},
+            {'reviewDecision': 'CHANGES_REQUESTED'}, {'autoMergeRequest': {'enabledAt': 'today'}},
+            {'isInMergeQueue': True}, {'isMergeQueueEnabled': True},
+        ]
+        for changes in cases:
+            with self.subTest(changes=changes), patch.dict(self.pull, changes):
+                self.assert_hold()
+
+    def test_holds_for_a_github_review_requirement(self):
+        self.pull.update(reviewDecision='REVIEW_REQUIRED', mergeStateStatus='BLOCKED')
+        self.assert_hold(WAITS)
+
+    def test_holds_for_queue_rule_or_disallowed_merge_method(self):
+        self.assert_hold(method='rebase')
+        for rule, method in (
+            ({'type': 'merge_queue'}, 'squash'),
+            ({'type': 'required_linear_history'}, 'merge'),
+            ({'type': 'pull_request', 'parameters': {'allowed_merge_methods': ['rebase']}}, 'squash'),
         ):
+            with self.subTest(rule=rule):
+                self.rules = [rule]
+                self.assert_hold(method=method)
+
+    def test_missing_or_invalid_approval_never_writes(self):
+        cases = [
+            [], [review(head=OLD)], [review(user=AUTHOR)], [review('PENDING')],
+            [review(user={'login': 'reviewer', 'id': 2, 'type': 'Bot'})],
+            [review(), review('DISMISSED', number=2)],
+            [dict(review(), submitted_at=None)], [review(), review()],
+            GitHubError('Unavailable'),
+        ]
+        for evidence in cases:
             with self.subTest(evidence=evidence):
-                self.responses[self.reviews] = evidence
-                self.assertEqual(self.check(), {'status': WAITING})
-                self.assertEqual(self.calls, [self.pull, self.reviews])
+                self.first = evidence
+                self.assert_hold(WAITS)
+        self.assert_hold(WAITS, humans='')
 
-    def test_reviewer_without_current_write_access_waits(self):
-        self.responses[self.reviews] = [[review()]]
-        self.responses[self.permission] = dict(permission='read', user=REVIEWER)
-        self.assertEqual(self.check(), {'status': WAITING})
-        self.assertEqual(self.calls, [self.pull, self.reviews, self.permission])
+    def test_unresolved_changes_request_blocks_even_on_unprotected_branch(self):
+        self.first.append(review('CHANGES_REQUESTED', number=2, user={
+            'login': 'other-reviewer', 'id': 3, 'type': 'User',
+        }))
+        self.assert_hold()
 
-    def test_qualifying_approval_is_verified_after_permission_and_review_rereads(self):
-        self.responses[self.reviews] = [[review(head=OLD)], [review(number=2), review('COMMENTED', number=3)]]
-        self.assertEqual(self.check(), {'status': 'Human approval verified', 'head': HEAD, 'reviewer': 'reviewer'})
-        self.assertEqual(self.calls, [self.pull, self.reviews, self.permission, self.pull, self.reviews])
+    def test_reviewer_without_verified_current_write_access_waits(self):
+        for permission in (
+            dict(permission='read', user=REVIEWER),
+            dict(permission='write', user=dict(REVIEWER, id=999)),
+        ):
+            with self.subTest(permission=permission):
+                self.permission = permission
+                self.assert_hold(WAITS)
 
-    def test_dismissal_during_eligibility_check_waits_even_with_same_head(self):
-        self.responses[self.reviews] = [[review()]]
+    def test_dismissal_after_eligibility_check_waits(self):
+        self.final = [review('DISMISSED')]
+        self.assert_hold(WAITS)
+        self.assertEqual(self.review_reads, 2)
 
-        def dismiss(command, **kwargs):
-            response = self.github(command, **kwargs)
-            if tuple(command[4:]) == self.permission:
-                self.responses[self.reviews] = [[review('DISMISSED')]]
-            return response
+    def test_incomplete_dismissal_waits_on_both_review_reads(self):
+        incomplete = [
+            {'id': 2, 'state': 'DISMISSED', 'user': {'id': 3, 'login': 'other-reviewer'}},
+            dict(review('DISMISSED', number=2, user={'id': 0, 'login': ' ', 'type': 'User'})),
+            dict(review('DISMISSED', number=2, user=AUTHOR), commit_id=None, submitted_at=None),
+        ]
+        for dismissal in incomplete:
+            with self.subTest(dismissal=dismissal):
+                self.first, self.final = [review(), dismissal], None
+                self.assert_hold(WAITS)
+                self.first, self.final = [review()], [review(), dismissal]
+                self.assert_hold(WAITS)
+                self.assertEqual(self.review_reads, 2)
 
-        self.assertEqual(self.check(dismiss), {'status': WAITING})
-        self.assertEqual(self.calls, [self.pull, self.reviews, self.permission, self.pull, self.reviews])
+    def test_changed_head_requires_a_new_worker_review(self):
+        self.assert_hold('Head changed', head=OLD)
+        self.on_permission = lambda: self.pull.update(headRefOid=OLD)
+        self.assertEqual(self.run_command(), {'status': 'Head changed', 'head': OLD})
+        self.assertEqual(self.review_reads, 1)
+        self.assertFalse(any(method == 'PUT' for method, _, _ in self.calls))
 
-    def test_head_change_during_eligibility_check_requires_worker_rereview(self):
-        self.responses[self.reviews] = [[review()]]
-
-        def advance(command, **kwargs):
-            response = self.github(command, **kwargs)
-            if tuple(command[4:]) == self.permission:
-                self.pr['headRefOid'] = OLD
-            return response
-
-        self.assertEqual(self.check(advance), {'status': 'Head changed', 'head': OLD})
-        self.assertEqual(self.calls, [self.pull, self.reviews, self.permission, self.pull])
+    def test_uncertain_merge_is_not_retried(self):
+        self.merge_response = GitHubError('Unconfirmed write')
+        result = self.run_command()
+        self.assertEqual(result['status'], 'Need attention')
+        self.assertIn('Reconcile GitHub state', result['reason'])
+        self.assertEqual(sum(method == 'PUT' for method, _, _ in self.calls), 1)
