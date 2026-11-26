@@ -12,9 +12,11 @@ Use `set-comment` to label each assigned pane `#ISSUE:#PR`, for example `#42:#27
 
 ## Periodic turn
 
-1. Restore missing entries from verified submissions. Recheck tracked PRs against the merging conditions and close any remaining panes for merged tasks in **Done**.
+1. Restore missing entries from verified submissions and reconcile unresolved launches using `query` and `capacity`. Recheck tracked PRs against the merging conditions and close any remaining panes for merged tasks in **Done**.
 2. Advance existing tasks first. Resume deferred follow-ups and send new actionable feedback on tracked PRs to the implementer. Send reviewable PRs and changed heads to `{{REVIEWER}}` at the exact current head. Skip actions that still need a person. After admission, record assigned feedback IDs and move the task to **In progress** or **In review** as appropriate.
 3. Use any remaining slots to run `{{IMPLEMENTER}}` on open issues labeled `{{LABEL}}` with no active assignment and no entry in **Done**. Add them to **In progress** after admission.
+
+If an initial submission returns `outcome_unknown`, record the issue, worker, pane ID and reason in **Need attention**. Keep that assignment active until the original submission is reconciled, even if the pane disappears. If provisioning reports `admission: not_attempted`, record the attachment problem and allow pane preparation to reclaim the unused slot. Retry the issue once the blocker is resolved.
 
 ## Merging conditions
 

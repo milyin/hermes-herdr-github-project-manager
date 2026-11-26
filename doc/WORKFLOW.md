@@ -49,6 +49,7 @@ Show the short pane ID, status, and optional single-line comment in that order, 
 | --- | --- |
 | `MGR` | Hermes manager pane. The gateway supplies the turn state. |
 | `QUOTA` | Codex quota receiver. |
+| `<tag>:START` | A worker pane created for its first submission. The admission field distinguishes an unused launch from a submission awaiting verification. |
 | `<tag>:RUN` | A worker turn is being submitted or is running. |
 | `<tag>:UNREAD` | A finished result awaits workflow acknowledgement. |
 | `<tag>:READ` | The workflow acknowledged the exact worker result. |
@@ -56,15 +57,17 @@ Show the short pane ID, status, and optional single-line comment in that order, 
 | `<tag>:ACK:<attention_id>` | The workflow acknowledged that escalation. The pane still uses its working slot. |
 | `<tag>:?` | The engine cannot verify the pane or turn outcome. |
 
-Use the short attention ID in the status, for example `I:WAIT:7`, so the same turn can have distinct escalations. Read the full worker name and native turn ID from the session binding. Verify label updates against the current binding. Confirm that the exact result is retrievable before marking a pane unread. The workflow decides when to close worker panes. Closure ends engine tracking and delivery for that pane.
+Use the short attention ID in the status, for example `I:WAIT:7`, so the same turn can have distinct escalations. Read the full worker name and native turn ID from the session binding. Verify label updates against the current binding. Confirm that the exact result is retrievable before marking a pane unread. The workflow decides when to close worker panes. Closure ends result delivery for that pane. An unresolved initial submission can outlive its pane.
 
 Treat a zoom-locked pane as `working` in all scheduling and capacity decisions. Check zoom immediately before a prompt, result delivery, or ordinary label update. Hold the operation when the pane is already zoomed. If the operator zooms just after the check, a message can land or a label-only update can complete. A present worker with an unknown lock still counts against capacity. Hold operations that require an unlocked or idle pane until its state is verified.
 
 ### Starting a worker turn
 
-Before `run` or `steer` submits a prompt, set and verify `<tag>:RUN` on the bound pane. Preserve its ID and comment. Serialize this update and submission with pane preparation and `mark-read` so an acknowledgement for the previous turn cannot restore its status during submission. If the status update cannot be verified, hold the prompt.
+`run` creates a `<tag>:START` pane. Provisioning failures can leave this pane visible with `admission: not_attempted`. Before the engine sends the initial prompt, it verifies the unlocked pane and idle thread and records the workspace, pane, terminal, worker and thread with a fingerprint of the dispatch. The record is private to the profile and contains no prompt text. A verified admission advances the pane to `<tag>:RUN`.
 
-After a definitive refusal, restore the prior status of a retained pane only if its binding and previous turn still match. If the engine stops during submission, check native turn state and receipts. Once the outcome is verified, a finished tracked turn beside `RUN` becomes `UNREAD`. If the engine stopped before submitting, this can deliver the previous result again. Hold an uncertain submission for reconciliation before retrying.
+Pane preparation can recover the same native thread when the agent manager reports it is recoverable. It closes a verified unused pane through the guarded close operation. If the receiver, terminal, idle state or zoom lock cannot be verified, the pane stays in place and continues to occupy capacity. A missing or unverified admission receipt keeps the dispatch on hold until the original binding identifies the admitted turn. Loss of the pane releases pane capacity after absence is verified, with the dispatch still held against replay. A legacy `RUN` pane without an identified turn has an unknown initial admission.
+
+Before `steer` submits a follow-up, set and verify `<tag>:RUN` on the bound pane. Serialize the update and submission with pane preparation and `mark-read`. After a definitive refusal, restore the prior status if the binding and previous turn still match. After an interruption, use native turn state and receipts before retrying. A verified finished turn beside `RUN` becomes `UNREAD`.
 
 ### Deferred close
 
@@ -126,7 +129,7 @@ Use the skills' public caller APIs. The engine owns pane roles, result delivery,
 The pane manager supplies workspace and pane identity, layout, and guarded mutations. [Herdr pane manager skill](https://github.com/milyin/hermes-herdr-pane-manager) · [Caller API](https://github.com/milyin/hermes-herdr-pane-manager/blob/main/references/api.md)
 
 - Use `workspaces` and `workspace-create` in the configured local Herdr instance. `layout` must expose the native pane and terminal IDs, displayed ID, status, comment, zoom state and pending closure separately. Use `lock-status` to verify the target's lock before operations. Use `process-info` to identify the retained pane of an exited manager launcher. A structured label appears in the native creation request so an interrupted creation remains visible for reconciliation.
-- Use `create --argv` with the manager working directory and status to launch the Hermes TUI. Worker panes are created by the agent manager during `provision` with the tagged status. Retain any pane ID from a partial or uncertain creation for reconciliation.
+- Use `create --argv` with the manager working directory and status to launch the Hermes TUI. Worker panes are created by the agent manager during `provision` with the tagged `START` status. Retain any pane ID from a partial or uncertain creation for reconciliation.
 - Require `create` and `rename` to take separate status and comment fields. Use `rename` to update either field while preserving the other field and the pane manager's displayed ID. Serialize label changes for the same pane. An empty comment clears it. Return both fields in `layout` and keep ordinary label updates subject to the zoom check.
 - Use `close --defer-locked` for project-manager closure. The guarded native operation receives the exact pane, terminal and workspace and checks the tab zoom state when closing. For `user_locked`, `tab_user_locked` or `guarded_close_unavailable`, mark the displayed ID `DEAD` and return `close_deferred` with the native pane ID. For `lock_unknown`, hold until the lock can be verified.
 

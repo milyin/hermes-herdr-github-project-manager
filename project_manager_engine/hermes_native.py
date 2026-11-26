@@ -86,7 +86,7 @@ class Native:
             raise Hold('missing_dependency', f'Install {skill} in this Hermes profile')
         return script
 
-    def invoke(self, argv, payload=None, timeout=80):
+    def invoke(self, argv, payload=None, timeout=80, *, bare=False):
         data = None if payload is None else json.dumps(payload, ensure_ascii=False) + '\n'
         try:
             child = subprocess.run(argv, input=data, capture_output=True, encoding='utf-8',
@@ -97,22 +97,28 @@ class Native:
         except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
             raise Hold('transport_error', 'Dependency returned no verified reply') from exc
         if reply.get('ok') is False:
-            error = dict(reply.get('error') or {})
-            code = error.pop('code', 'dependency_refused')
-            message = error.pop('message', 'The dependency refused the operation')
+            if not isinstance(reply.get('error'), dict) or 'result' in reply:
+                raise Hold('invalid_response', 'Dependency returned an invalid error receipt')
+            error = dict(reply['error'])
+            code = error.pop('code', None)
+            message = error.pop('message', None)
+            if not isinstance(code, str) or not isinstance(message, str):
+                raise Hold('invalid_response', 'Dependency returned an invalid error receipt')
             if code == 'partial_create':
                 code = 'partial_provision'
             raise Hold(code, message, **error)
-        if child.returncode:
-            raise Hold('dependency_refused', 'Dependency process exited without a verified successful reply')
-        return reply.get('result', reply)
+        if bare and not child.returncode and 'ok' not in reply:
+            return reply
+        if child.returncode or reply.get('ok') is not True or not isinstance(reply.get('result'), dict):
+            raise Hold('invalid_response', 'Dependency returned no verified successful receipt')
+        return reply['result']
 
     def pane(self, operation, *args, workspace=None, payload=None):
         scope = ['--instance', self.settings.instance]
         if workspace is not None:
             scope.extend(['--workspace', workspace])
         script = self.script('hermes-herdr-pane-manager', 'pane_manager.py')
-        return self.invoke(isolated_python(script, operation, *scope, *args), payload)
+        return self.invoke(isolated_python(script, operation, *scope, *args), payload, bare=operation == 'layout')
 
     def agent(self, operation, workspace=None, pane=None, *args, payload=None):
         scope = [] if workspace is None else ['--instance', self.settings.instance, '--workspace', workspace]
@@ -132,7 +138,7 @@ class Native:
     def provision(self, workspace, worker, cwd):
         return self.agent('provision', workspace, None, '--agent', worker.backend, '--worker',
                           worker.name, '--model', worker.model, '--cwd', cwd, '--group', GROUP,
-                          '--status', f'{worker.tag}:RUN', *self.launch_options(worker.launch_profile))
+                          '--status', f'{worker.tag}:START', *self.launch_options(worker.launch_profile))
 
     def quota(self, launch_profile):
         return self.agent('account-quota', None, None, *self.launch_options(launch_profile))
