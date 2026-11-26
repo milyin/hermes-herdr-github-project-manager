@@ -8,7 +8,7 @@ import sys
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import DEFAULT, AsyncMock, Mock, patch
 
 import yaml
 
@@ -100,22 +100,39 @@ class StartupInterview(unittest.TestCase):
             'hermes_cli.gateway_runtime': gateway_runtime,
         }))
         spec.loader.exec_module(plugin)
-        stack.enter_context(patch.object(plugin, 'raw_settings', return_value={'enabled': True}))
+        self.raw_settings = stack.enter_context(patch.object(plugin, 'raw_settings', wraps=plugin.raw_settings,
+                                                           return_value={'enabled': True}))
         stack.enter_context(patch.object(plugin, 'profile_context', side_effect=nullcontext))
         stack.enter_context(patch.object(plugin, 'setup', side_effect=plugin.Hold('invalid_config', 'manager is required')))
         stack.enter_context(patch.object(plugin, 'threading', SimpleNamespace(
             Lock=plugin.threading.Lock, Thread=lambda target, **_: Mock(start=target))))
-        self.logs = stack.enter_context(self.assertLogs(plugin.LOG, level='WARNING'))
+        self.warnings = []
+        stack.enter_context(patch.object(plugin.LOG, 'warning', side_effect=lambda msg, *args: self.warnings.append(msg % args)))
         plugin.Native(self.home).save_binding({'workspace': 'w1', 'session_id': 'bound'})
         self.snapshot = {'session_id': 'operator', 'running': False, 'pending': []}
         self.receipt = {'ref': {'session_id': 'operator'}, 'admission_id': 'admitted'}
         self.rpc.side_effect = [self.snapshot, self.receipt]
-        ctx = Mock()
-        plugin.register(ctx)
-        self.hooks = dict(call.args for call in ctx.register_hook.call_args_list)
+        self.ctx = Mock()
+        plugin.register(self.ctx)
+        self.hooks = dict(call.args for call in self.ctx.register_hook.call_args_list)
 
     def methods(self):
         return [call.args[0] for call in self.rpc.await_args_list]
+
+    def test_bound_manager_gets_config_error_after_yaml_is_edited(self):
+        tool = next(call for call in self.ctx.register_tool.call_args_list if call.args[0] == 'project_manager_steer')
+        schema, handler = tool.args[2:]
+        restrict_tools = dict(call.args for call in self.ctx.register_middleware.call_args_list)['llm_request']
+        (self.home / 'config.yaml').write_text('skills: [', encoding='utf-8')
+        self.raw_settings.return_value = DEFAULT
+
+        self.assertTrue(tool.kwargs['check_fn']())
+        self.assertIsNone(restrict_tools({'tools': [schema]}, session_id='bound'))
+        error = json.loads(handler({'pane_id': 'w1:p2', 'prompt': 'next turn'}, session_id='bound'))['error']
+        self.assertEqual(error['code'], 'invalid_config')
+        self.assertIn('Invalid YAML in config.yaml', error['message'])
+        self.assertEqual(restrict_tools({'tools': [schema]}, session_id='operator'), {'request': {'tools': []}})
+        self.assertEqual(json.loads(handler({}, session_id='operator'))['error']['code'], 'unbound_session')
 
     def test_startup_submits_interview_to_operator_once(self):
         self.hooks['on_session_open']('bound', 'tui')
@@ -141,7 +158,7 @@ class StartupInterview(unittest.TestCase):
         self.hooks['on_session_open']('operator', 'tui')
 
         self.assertEqual(self.methods(), ['session.resume', 'prompt.submit'])
-        self.assertIn('gateway_unavailable', '\n'.join(self.logs.output))
+        self.assertIn('gateway_unavailable', '\n'.join(self.warnings))
 
     def test_startup_retries_after_disconnect_during_resume(self):
         self.rpc.side_effect = [self.GatewayClientError('Connection lost'), self.snapshot, self.receipt]
@@ -151,7 +168,7 @@ class StartupInterview(unittest.TestCase):
         self.hooks['on_session_open']('operator', 'tui')
 
         self.assertEqual(self.methods(), ['session.resume', 'session.resume', 'prompt.submit'])
-        self.assertIn('gateway_unavailable', '\n'.join(self.logs.output))
+        self.assertIn('gateway_unavailable', '\n'.join(self.warnings))
 
     def test_startup_retries_when_gateway_client_confirms_submit_was_not_sent(self):
         self.rpc.side_effect = [self.snapshot, self.GatewayClientError(self.NOT_SENT), self.snapshot, self.receipt]
@@ -160,7 +177,7 @@ class StartupInterview(unittest.TestCase):
         self.hooks['on_session_open']('operator', 'tui')
 
         self.assertEqual(self.methods(), ['session.resume', 'prompt.submit', 'session.resume', 'prompt.submit'])
-        self.assertIn('gateway_unavailable', '\n'.join(self.logs.output))
+        self.assertIn('gateway_unavailable', '\n'.join(self.warnings))
 
     def test_startup_holds_duplicate_after_lost_submit_reply(self):
         self.rpc.side_effect = [self.snapshot, self.GatewayClientError('Reply lost'),
@@ -171,7 +188,7 @@ class StartupInterview(unittest.TestCase):
         self.hooks['on_session_open']('operator', 'tui')
 
         self.assertEqual(self.methods(), ['session.resume', 'prompt.submit'])
-        self.assertIn('outcome_unknown', '\n'.join(self.logs.output))
+        self.assertIn('outcome_unknown', '\n'.join(self.warnings))
         self.hooks['on_session_open']('another-operator', 'tui')
         self.assertEqual(self.methods(), ['session.resume', 'prompt.submit', 'session.resume', 'prompt.submit'])
         self.assertEqual(self.rpc.await_args.kwargs['session_id'], 'another-operator')

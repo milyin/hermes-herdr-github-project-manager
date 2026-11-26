@@ -63,7 +63,7 @@ Each `--param` takes one `KEY=VALUE` token. Quote the whole token with double qu
 
 | Command | Information returned |
 | --- | --- |
-| `/project-manager workers` | Configured worker names, pane tags, descriptions, agent, model and declared template parameters. Shows which parameters require a value for a run. |
+| `/project-manager workers` | Configured worker names, pane tags, descriptions, agent, model, reasoning effort and declared template parameters. Shows which parameters require a value for a run. |
 | `/project-manager panes [FILTER ...]` | Workspace ID and matching managed panes from the live Herdr layout. Each record includes the native `pane_id`, `role`, `worker` when relevant, displayed `status` and `comment`, `presence`, `lock`, effective `state`, latest native `turn_id` when known, `completed_at` when known, `delivery`, and any pending closure. A current escalation includes `attention_id`, `state`, `reason`, and `observed_at`. |
 | `/project-manager capacity` | Maximum working panes, occupied pane IDs, available slots, `unresolved_launches` with admission and presence, and which workers pass the [scripted launch preflight](WORKFLOW.md#cron-tick). Report the hold reason for each unavailable worker. |
 | `/project-manager quota [--worker NAME]` | For all configured Codex accounts or the account used by the named worker, show the associated workers, window usage, elapsed allowance, reset, observation time and reason for any hold. A worker without a Codex quota check reports that quota is inapplicable. |

@@ -59,7 +59,7 @@ def read_yaml(source):
 def config_file(home):
     try:
         with (home / 'config.yaml').open(encoding='utf-8') as source:
-            return mapping(read_yaml(source) or {}, 'profile')
+            return optional_mapping(read_yaml(source), 'profile')
     except FileNotFoundError:
         return {}
     except (OSError, ValueError, TypeError) as exc:
@@ -70,6 +70,10 @@ def mapping(value, where):
     if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
         raise Hold('invalid_config', f'{where} must be a mapping with string keys')
     return value
+
+
+def optional_mapping(value, where):
+    return {} if value is None else mapping(value, where)
 
 
 def require(test, message):
@@ -149,6 +153,7 @@ class Agent:
     tag: str | None = None
     launch_profile: str | None = None
     work_root: str | None = None
+    reasoning_effort: str | None = None
 
     @classmethod
     def read(cls, home, record, where, *, manager=False):
@@ -157,6 +162,11 @@ class Agent:
         name = text_field(record, 'name', where, default_name if manager else None)
         require(NAME.fullmatch(name), f'{where}.name uses lowercase letters, digits and hyphens')
         backend = 'hermes' if manager else text_field(record, 'agent', where)
+        effort = None
+        if 'reasoning_effort' in record:
+            require(backend == 'codex', f'{where}.reasoning_effort is supported only for Codex workers')
+            effort = text_field(record, 'reasoning_effort', where)
+            require(not any(char.isspace() for char in effort), f'{where}.reasoning_effort must be a single value')
         tag = None if manager else text_field(record, 'pane_tag', where)
         require(manager or WORKER_TAG.fullmatch(tag), f'{where}.pane_tag must use one to four ASCII letters or digits')
         launch = text_field(record, 'launch_profile', where) if 'launch_profile' in record else None
@@ -171,7 +181,7 @@ class Agent:
         prompt = Prompt.read(home, f'{where} ({name})', text_field(record, 'prompt_file', where),
                              record.get('parameters', {}), manager=manager)
         return cls(name, backend, text_field(record, 'model', where), cwd,
-                   text_field(record, 'description', where), prompt, tag, launch, work_root)
+                   text_field(record, 'description', where), prompt, tag, launch, work_root, effort)
 
 
 @dataclass(frozen=True)
@@ -205,9 +215,9 @@ class Settings:
 
 def raw_settings(home):
     profile = config_file(home)
-    skills = mapping(profile.get('skills') or {}, 'skills')
-    config = mapping(skills.get('config') or {}, 'skills.config')
-    raw = mapping(config.get(SKILL) or {}, SKILL)
+    skills = optional_mapping(profile.get('skills'), 'skills')
+    config = optional_mapping(skills.get('config'), 'skills.config')
+    raw = optional_mapping(config.get(SKILL), SKILL)
     if 'enabled' in raw:
         require(type(raw['enabled']) is bool, 'enabled must be true or false')
     return raw

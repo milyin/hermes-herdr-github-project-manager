@@ -11,7 +11,7 @@ import yaml
 
 from project_manager_engine.engine import Engine, quota_plan
 from project_manager_engine.hermes_native import Native, WATCHDOG_INPUT, unknown_watchdog_admission
-from project_manager_engine.interface import parse
+from project_manager_engine.interface import outcome, parse
 from project_manager_engine.settings import Hold, SKILL, Settings, raw_settings
 
 
@@ -140,6 +140,85 @@ class Contract(unittest.TestCase):
     def save(self):
         text = yaml.safe_dump({'skills': {'config': {SKILL: self.config}}})
         (self.home / 'config.yaml').write_text(text)
+
+    def test_first_turn_passes_configured_reasoning_effort(self):
+        self.config['workers'][0]['reasoning_effort'] = 'high'
+        self.save()
+        self.native.result['turn_model_options'] = True
+        with (patch.object(self.native, 'preflight', return_value=dict(
+                  turn_model_options=True, reasoning_efforts=['medium', 'high'])),
+              patch.object(self.native, 'agent', wraps=self.native.agent) as agent):
+            receipt = self.engine.execute('run', name='worker', parameters={'TASK': 'fixture'})
+
+        call = next(call for call in agent.call_args_list if call.args[0] == 'run')
+        self.assertEqual(call.args[-3:], ('--model', 'test', '--request-stdin'))
+        self.assertEqual(call.kwargs['payload']['reasoning_effort'], 'high')
+        self.assertEqual(receipt['admission'], 'accepted')
+
+    def test_followup_reloads_model_and_effort_and_restores_default(self):
+        worker = self.config['workers'][0]
+        worker['reasoning_effort'] = 'high'
+        self.save()
+        self.native.rows.append(self.native.worker)
+        self.native.result['turn_model_options'] = True
+        with (patch.object(self.native, 'preflight', return_value=dict(
+                  turn_model_options=True, reasoning_efforts=['medium', 'high'])),
+              patch.object(self.native, 'agent', wraps=self.native.agent) as agent):
+            self.engine.execute('steer', pane_id='w1:p2', prompt='First follow-up')
+            worker.update(model='new-model', reasoning_effort='medium')
+            self.save()
+            self.engine.execute('steer', pane_id='w1:p2', prompt='Updated follow-up')
+            del worker['reasoning_effort']
+            self.save()
+            self.engine.execute('steer', pane_id='w1:p2', prompt='Use the default')
+
+        submitted = [call for call in agent.call_args_list if call.args[0] == 'steer']
+        self.assertEqual([(call.kwargs['payload']['model'], call.kwargs['payload']['reasoning_effort'])
+                          for call in submitted], [('test', 'high'), ('new-model', 'medium'), ('new-model', None)])
+        self.assertTrue(all(call.args[2:5] == ('w1:p2', '--thread-id', 'thread') for call in submitted))
+
+    def test_invalid_config_reports_setting_and_prevents_turn(self):
+        worker = self.config['workers'][0]
+        worker['reasoning_effort'] = ['high']
+        self.save()
+        result = outcome(self.home, 'run', {'name': 'worker'})
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['error']['code'], 'invalid_config')
+        self.assertIn('workers[0].reasoning_effort must be nonempty text', result['error']['message'])
+
+        worker['reasoning_effort'] = 'unknown'
+        self.save()
+        self.native.rows.append(self.native.worker)
+        self.native.worker['status'] = 'I:UNREAD'
+        self.native.result['turn_model_options'] = True
+        with (patch.object(self.native, 'preflight', return_value=dict(
+                  turn_model_options=True, reasoning_efforts=['high'])),
+              patch.object(self.native, 'agent', wraps=self.native.agent) as agent):
+            with self.assertRaisesRegex(Hold, "reasoning_effort 'unknown' is unsupported by model 'test'") as error:
+                self.engine.execute('steer', pane_id='w1:p2', prompt='Invalid config')
+        self.assertEqual(error.exception.code, 'invalid_config')
+        self.assertTrue(all(call.args[0] == 'status' for call in agent.call_args_list))
+        self.assertEqual(self.native.worker['status'], 'I:UNREAD')
+
+        for content, message in (('skills: [', 'Invalid YAML'), ('skills: false', 'skills must be a mapping')):
+            with self.subTest(content=content):
+                (self.home / 'config.yaml').write_text(content)
+                result = outcome(self.home, 'steer', {'pane_id': 'w1:p2', 'prompt': 'Invalid config'})
+                self.assertEqual(result['error']['code'], 'invalid_config')
+                self.assertIn(message, result['error']['message'])
+
+    def test_configured_effort_requires_explicit_dependency_support(self):
+        self.config['workers'][0]['reasoning_effort'] = 'high'
+        self.save()
+        with self.assertRaises(Hold) as error:
+            self.engine.execute('run', name='worker', parameters={'TASK': 'fixture'})
+        self.assertEqual(error.exception.code, 'turn_model_options_unavailable')
+        self.assertEqual(self.native.rows, [self.native.manager])
+
+        self.native.rows.append(self.native.worker)
+        with self.assertRaises(Hold) as error:
+            self.engine.execute('steer', pane_id='w1:p2', prompt='Follow-up')
+        self.assertEqual(error.exception.code, 'turn_model_options_unavailable')
 
     def managed_root(self):
         root = self.home / 'managed'
