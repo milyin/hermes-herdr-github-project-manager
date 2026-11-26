@@ -214,10 +214,18 @@ class Contract(unittest.TestCase):
         hold = self.engine.execute('prepare_panes')['holds'][0]['error']
         self.assertEqual((hold['reason'], hold['dependency']),
                          ('turn_guard_unavailable', 'hermes-herdr-agent-manager'))
+        for _ in range(2):
+            tick = self.engine.execute('tick')
+            self.assertEqual(tick['action'], 'capacity_held')
+            self.assertEqual(tick['holds'][0]['error'], hold)
+            self.assertEqual(tick['unresolved_launches'][0]['pane_id'], 'w1:p2')
+        self.assertEqual(self.native.submissions, [])
         self.assertEqual(self.native.closes, [])
         self.assertEqual(self.engine.execute('capacity')['available'], 0)
+        # Simulate the operator closing the pane directly in Herdr.
         self.native.rows.remove(self.native.worker)
         self.assertEqual(self.engine.execute('capacity')['available'], 1)
+        self.assertEqual(self.engine.execute('tick')['event'], 'periodic')
 
     def test_provision_timeout_can_be_discovered_and_cleanup_waits_for_lock_and_binding(self):
         self.native.provision_error = Hold('transport_error', 'Provision reply was lost')
