@@ -6,7 +6,7 @@ This specification defines the target behavior. [Profile settings](PROFILE.md) d
 
 The **workflow** is the set of user-selected manager and worker prompts. It defines how to find work, assign it, act on results, and track project progress. It chooses its own data sources, services, and storage. The [GitHub workflow](MANAGER_PROMPT.md) is an example that uses a wiki dashboard. Other workflows can use different project data and storage.
 
-The **engine** is the project-agnostic part of the installable skill. It renders prompts, prepares panes, tracks turns, enforces quota and concurrency, and delivers worker results. Its input contract treats prompt text, parameters, pane comments, and results as opaque data, independent of the workflow's services and storage. Herdr workspace and pane IDs identify managed panes, and the status field of each pane label holds the engine's persistent status. The engine reads session bindings, exact turns, results, and receipts through the native APIs. These are its only sources of persistent operational state.
+The **engine** is the project-agnostic part of the installable skill. It renders prompts, prepares panes, tracks turns, enforces quota and concurrency, and delivers worker results. Its input contract treats prompt text, parameters, pane comments, and results as opaque data, independent of the workflow's services and storage. Herdr's live pane list is the source of truth for which panes the engine tracks. Each pane label's status field holds the engine's persistent status for that pane. The engine reads session bindings, exact turns, results, and receipts through the native APIs for the panes it finds there.
 
 The manager runs the workflow in a Hermes gateway session displayed in the terminal UI (TUI) in a dedicated Herdr pane. It calls the [project-manager tools](COMMANDS.md#manager-tools) to delegate and inspect workers. The engine uses the pane manager for layout and the agent manager for worker sessions and quota.
 
@@ -50,16 +50,22 @@ Show the short pane ID, status, and optional single-line comment in that order, 
 | --- | --- |
 | `MGR` | Hermes manager pane. The gateway supplies the turn state. |
 | `QUOTA` | Codex quota receiver. |
-| `<tag>:RUN` | The latest worker turn is starting or running. |
+| `<tag>:RUN` | A worker turn is being submitted or is running. |
 | `<tag>:UNREAD` | A finished result awaits workflow acknowledgement. |
 | `<tag>:READ` | The workflow acknowledged the exact worker result. |
 | `<tag>:WAIT:<attention_id>` | An escalation awaits workflow acknowledgement. |
 | `<tag>:ACK:<attention_id>` | The workflow acknowledged that escalation. The pane still uses its working slot. |
 | `<tag>:?` | The engine cannot verify the pane or turn outcome. |
 
-Use the short attention ID in the status, for example `I:WAIT:7`, so the same turn can have distinct escalations. Read the full worker name and native turn ID from the session binding. Verify label updates against the current binding. Confirm that the exact result is retrievable before marking a pane unread. For a closed pane whose binding can be verified, use native turn history for the result. The workflow decides when to close worker panes. The engine verifies that a requested close is safe.
+Use the short attention ID in the status, for example `I:WAIT:7`, so the same turn can have distinct escalations. Read the full worker name and native turn ID from the session binding. Verify label updates against the current binding. Confirm that the exact result is retrievable before marking a pane unread. The workflow decides when to close worker panes. Closure ends engine tracking and delivery for that pane.
 
 Treat a zoom-locked pane as `working` in all scheduling and capacity decisions. Check zoom immediately before a prompt, result delivery, or ordinary label update. Hold the operation when the pane is already zoomed. If the operator zooms just after the check, a message can land or a label-only update can complete. A present worker with an unknown lock still counts against capacity. Hold operations that require an unlocked or idle pane until its state is verified.
+
+### Starting a worker turn
+
+Before `run` or `steer` submits a prompt, set and verify `<tag>:RUN` on the bound pane. Preserve its ID and comment. Serialize this update and submission with pane preparation and `mark-read` so an acknowledgement for the previous turn cannot restore its status during submission. If the status update cannot be verified, hold the prompt.
+
+After a definitive refusal, restore the prior status of a retained pane only if its binding and previous turn still match. If the engine stops during submission, check native turn state and receipts. Once the outcome is verified, a finished tracked turn beside `RUN` becomes `UNREAD`. If the engine stopped before submitting, this can deliver the previous result again. Hold an uncertain submission for reconciliation before retrying.
 
 ### Deferred close
 
@@ -69,7 +75,7 @@ The pane manager preserves the `DEAD` mark through status and comment updates an
 
 Determine manager turn state through the Hermes gateway and worker state through the agent manager. Distinguish a running turn (`working`), an agent waiting for input or approval (`blocked`), and a bound pane process stopped by the operating system (`suspended`). A suspended manager TUI prevents scheduled delivery even while the gateway keeps running. A `done` result requires a completion receipt for the exact turn. With missing or conflicting evidence, report `unknown`. Hold new submissions to blocked, suspended, and unknown sessions. An unfinished worker turn continues to occupy capacity while blocked or suspended. Use Herdr's UI agent status as evidence for a hold and the bound session to verify readiness and turn completion. [Herdr status detection](https://herdr.dev/tui/docs/agents/#how-status-works)
 
-The agent manager handles recoverable worker problems in the bound session. For example, it can reconnect to the same app server and verify the thread and turn before resuming observation. Escalate when recovery cannot proceed or a person needs to respond, including unanswered approvals and operator suspensions. Preserve the pane and checkout. When the worker backend confirms an interruption, deliver the interruption for the verified pane and turn. Use the native binding and turn history to identify a result if the pane has closed.
+The agent manager handles recoverable worker problems in the bound session. For example, it can reconnect to the same app server and verify the thread and turn before resuming observation. Escalate when recovery cannot proceed or a person needs to respond, including unanswered approvals and operator suspensions. Preserve the pane and checkout. When the worker backend confirms an interruption, deliver the interruption for the verified open pane and turn.
 
 ## Cron tick
 
@@ -94,7 +100,7 @@ Send a `worker_result` event with `worker`, `pane_id`, the native `turn_id` and 
 
 Identify a result by workspace, worker pane ID and worker turn ID. Keep one stable gateway event ID per delivery attempt. If the manager turn ends and the result is still unread, derive a new attempt ID from the last gateway receipt and try again on a later tick. If admission is uncertain, resolve that attempt before reading another result.
 
-The engine delivers pending worker results. The workflow can act on information from any source and calls `mark-read` for the exact pane and turn after handling the result. The engine changes the status only if the pane still represents that turn. Accept `steer` on any eligible idle pane, regardless of prior delivery or acknowledgement. A successful `steer` supersedes the previous result for delivery and changes the pane status to `<tag>:RUN`. A refused `steer` leaves the previous state in place. The previous result remains available through native turn history.
+The engine delivers pending worker results for open panes. The workflow can act on information from any source and calls `mark-read` for the exact pane and turn after handling the result. The engine changes the status only if the pane still represents that turn. Accept `steer` on any eligible idle pane, regardless of prior delivery or acknowledgement. A successful `steer` supersedes the previous result for delivery. The previous result remains available through native turn history while the pane is open.
 
 ### Worker attention
 
@@ -129,7 +135,7 @@ The agent manager supplies worker sessions, native worker turn operations, and C
 
 - Use `provision` with the backend and working directory, and `run --model` with the selected model. Require a scripted launch preflight that verifies the configured agent, model, working directory, and any requested launch profile without opening a worker pane or invoking a model. Pass the launch profile reference through unchanged. The agent manager applies that profile to the pane and refuses the launch if it cannot apply it. Keep credentials out of prompts and receipts.
 - For Codex, `provision` must establish and report the binding between the private app server, native thread ID, and interactive worker pane. Require that the TUI can display turns submitted by the agent manager, and that the agent manager can observe turns and state changes initiated through the TUI. Hold automation while that binding cannot be verified. [Interactive Codex workers](#interactive-codex-workers)
-- Require a machine-readable status query for the exact bound session, including before its first turn. Use native backend state and bound process state to distinguish idle, working, blocked, suspended and unknown. Use `wait` with the exact known turn ID to observe completion. Expose results and named run parameters by exact thread and turn through native session history, including for closed panes whose bindings can be verified. Distinguish confirmed failure or interruption from an unknown outcome.
+- Require a machine-readable status query for the exact bound session, including before its first turn. Use native backend state and bound process state to distinguish idle, working, blocked, suspended and unknown. Use `wait` with the exact known turn ID to observe completion. Expose results and named run parameters by exact thread and turn through native session history for bound open panes. Distinguish confirmed failure or interruption from an unknown outcome.
 - Recover routine worker failures through the verified session when possible. Resolve ambiguous submissions before retrying. Leave approvals and requested input to the operator. For a block that needs escalation, expose its state, reason, observed time, and a short, label-safe `attention_id` unique within the pane and turn. Keep that ID through repeated observations of the same block. Report when the block clears.
 - Use idle `steer` bound with `--thread-id` and `--after-turn-id`. Initial and follow-up worker submissions must enforce idle and lock checks and return a verifiable admission receipt independently of completion. Distinguish a definitive refusal from an unknown outcome.
 - Use `get-remaining-tokens --agent codex` for remaining percentage, window duration, and reset time. Verify that readings and submissions refer to the same Codex account. Report unavailable or unverified observations so the project manager can hold the affected work.
