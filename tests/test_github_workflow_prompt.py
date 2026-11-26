@@ -454,6 +454,33 @@ class GitHubWorkflowPrompt(unittest.TestCase):
         self.assertEqual(self.review_reads, 1)
         self.assertFalse(any(method == 'PUT' for method, _, _ in self.calls))
 
+    def test_changed_head_releases_existing_approval_hold_for_review(self):
+        self.pull['headRefOid'] = OLD
+        self.first = []
+        self.assert_hold(WAITS, head=OLD)
+
+        self.pull['headRefOid'] = HEAD
+        self.assertEqual(self.run_command(head=OLD), {'status': 'Head changed', 'head': HEAD})
+        self.assertFalse(any(method == 'PUT' for method, _, _ in self.calls))
+        self.assertIn('Record the PR and full SHA of the verified clean verdict for this merge hold.', self.procedure)
+        self.assertIn('For **Head changed**, clear the old approval hold and record the current reviewable head '
+                      'for review through **Shared scheduling**.', self.procedure)
+
+        prompt = self.workflows.manager.prompt.render()[0]
+        self.assert_dispatch_prose(prompt)
+        with self.subTest(available_slots=0):
+            queued = self.admission_policy(prompt, 'Capacity wait')
+            self.assertEqual(queued['Review placement'], 'In review → Queue')
+            self.assertEqual(queued['Next action'], 'Wait for capacity')
+        with self.subTest(available_slots=1):
+            ready = self.admission_policy(prompt, 'Ready to dispatch')
+            self.assertEqual(ready['Next action'], 'Record intent and dispatch once')
+            admitted = self.admission_policy(prompt, 'Verified admission')
+            self.assertEqual(admitted['Review placement'], 'In review')
+
+        self.first = [review(head=OLD)]
+        self.assert_hold(WAITS, head=HEAD)
+
     def test_uncertain_merge_is_not_retried(self):
         self.merge_response = GitHubError('Unconfirmed write')
         result = self.run_command()

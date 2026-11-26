@@ -52,6 +52,8 @@ GitHub's merge readiness and active branch rules are checked before the direct m
 
 The dashboard lists **Need attention**, **In progress**, **In review**, and **Done** in that order. Each issue has one entry. Ready implementation work and follow-ups wait under **In progress → Queue**, and ready PR heads wait under **In review → Queue** when all worker slots are occupied. Operator blockers and PRs queued or scheduled for merge in GitHub stay in **Need attention**.
 
+**Awaiting human approval** holds merge attempts for the exact PR head with a clean worker verdict and clear feedback. A changed head or new actionable feedback clears that hold so the manager can schedule the required review or implementation follow-up.
+
 The manager uses the same priority on a periodic turn and after recording a worker result. Work already in either queue gets the first eligible slot, then other tracked work, including follow-ups from the current result. The manager saves and acknowledges the exact result before scheduling. It verifies admission before moving the entry to the active list and recording the admitted feedback as assigned. Pending feedback and interrupted dispatch identifiers stay on the same issue entry. [Shared scheduling](MANAGER_PROMPT.md#shared-scheduling) · [Worker admission rules](MANAGER_PROMPT.md#worker-queues-and-admission)
 
 ## Worker handoffs
