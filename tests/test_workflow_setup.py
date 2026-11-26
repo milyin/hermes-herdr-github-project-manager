@@ -1,6 +1,7 @@
 import importlib.util
 import json
 from contextlib import ExitStack, nullcontext
+from copy import deepcopy
 import os
 from pathlib import Path
 import re
@@ -23,6 +24,12 @@ ROOT = Path(__file__).resolve().parents[1]
 REPO = 'owner/repository'
 APP = 'example-app'
 LABEL = 'hermes:projectmanager'
+
+
+def runtime_hook(request, binding, *, env=None):
+    child = subprocess.run(request['argv'], cwd=request['cwd'], input=request['stdin'], env=env,
+                           capture_output=True, text=True, timeout=10)
+    return dict(binding=binding, returncode=child.returncode, stdout=child.stdout, setup_receipt='fixture-receipt')
 
 
 class BundledWorkflows(unittest.TestCase):
@@ -71,6 +78,35 @@ class BundledWorkflows(unittest.TestCase):
         with self.assertRaisesRegex(Hold, 'reserved for the setup hook'):
             self.github_settings()
 
+    def test_documented_profile_edits_preserve_existing_settings(self):
+        guide = (ROOT / 'workflows' / 'github' / 'README.md').read_text()
+        migration = guide.split('## Update an existing GitHub profile', 1)[1]
+        hook = yaml.safe_load(re.search(r'```yaml\n(.*?)\n```', migration, re.DOTALL)[1])
+        paths = dict(re.findall(r'\| `([^`]+)` \| `([^`]+)` \|', migration))
+        self.github.update(max_working_panes=3, herdr={'instance': 'fixture'})
+        self.github['manager']['parameters'].update(github_identity=APP, REPO=REPO, LABEL='existing-label')
+        self.github['workers'][0].update(model='existing-model', launch_profile='existing-profile')
+        self.github['workers'][1]['prompt_file'] = str(self.home / self.github['workers'][1]['prompt_file'])
+
+        for old_paths in (False, True):
+            with self.subTest(old_paths=old_paths):
+                profile = deepcopy(self.github)
+                del profile['setup_hook']
+                records = [profile['manager'], *profile['workers']]
+                if old_paths:
+                    for record in records:
+                        for old, new in paths.items():
+                            record['prompt_file'] = record['prompt_file'].replace(new, old)
+                error = 'cannot read prompt file' if old_paths else 'requires a setup_hook'
+                with self.assertRaisesRegex(Hold, error):
+                    Settings.read(self.home, profile)
+                profile.update(hook)
+                for record in records:
+                    for old, new in paths.items():
+                        record['prompt_file'] = record['prompt_file'].replace(old, new)
+                self.assertEqual(profile, self.github)
+                self.assertEqual(Settings.read(self.home, profile), Settings.read(self.home, self.github))
+
     def test_setup_hook_checks_launcher_capability_before_status(self):
         folder = self.home / 'fixture bin'
         folder.mkdir()
@@ -93,6 +129,12 @@ esac
         settings = self.github_settings()
         native = Native(self.home)
         native.configure(settings)
+        native.verify_manager_target = Mock(return_value='manager-session')
+        native.gateway = Mock(side_effect=lambda operation, sid, request: runtime_hook(
+            request, dict(session_id=sid, cwd=str(self.home))))
+        def run_hook():
+            return native.setup_environment(settings.manager, str(self.home), settings.manager.prompt.parameters(),
+                                            target={'pane_id': 'manager-pane'}, workspace='fixture')
         status = dict(authenticated=True, actor=f'{APP}[bot]', repository=REPO, permissions={'contents': 'write'})
         with patch.dict(os.environ, {'PATH': f'{folder}{os.pathsep}{os.defpath}', 'FIXTURE_CALLS': str(calls),
                                     'FIXTURE_STATUS': json.dumps(status)}):
@@ -100,17 +142,61 @@ esac
                 with self.subTest(capability=capability), patch.dict(os.environ, {'FIXTURE_LAUNCHER': capability}):
                     calls.write_text('')
                     with self.assertRaisesRegex(Hold, 'lacks merge-reviewed support'):
-                        native.setup_environment(settings.manager, str(self.home), settings.manager.prompt.parameters())
+                        run_hook()
                     self.assertEqual(calls.read_text().splitlines(), ['merge-reviewed'])
             calls.write_text('')
-            result = native.setup_environment(settings.manager, str(self.home), settings.manager.prompt.parameters())
-            self.assertEqual(result, {'setup_launcher': shlex.quote(str(launcher))})
+            self.assertEqual(run_hook(), ({'setup_launcher': shlex.quote(str(launcher))}, 'fixture-receipt'))
             self.assertEqual(calls.read_text().splitlines(), ['merge-reviewed', 'status'])
             for changes, error in (({'actor': 'different-app[bot]'}, 'Could not verify'),
                                    ({'permissions': {'contents': 'read'}}, 'requires contents write permission')):
                 with self.subTest(changes=changes), patch.dict(os.environ, {'FIXTURE_STATUS': json.dumps(status | changes)}):
                     with self.assertRaisesRegex(Hold, error):
-                        native.setup_environment(settings.manager, str(self.home), settings.manager.prompt.parameters())
+                        run_hook()
+
+    def test_worker_hook_uses_bound_xdg_config_and_rejects_unverified_evidence(self):
+        launcher = self.home / APP
+        launcher.write_text('''#!/bin/sh
+case "$3" in
+    merge-reviewed) printf '%s\\n' '--reviewed-head' ;;
+    status) cat "$XDG_CONFIG_HOME/app-status.json" ;;
+    *) exit 99 ;;
+esac
+''')
+        launcher.chmod(0o700)
+        controller = self.home / 'controller'
+        controller.mkdir()
+        (controller / 'app-status.json').write_text(json.dumps(dict(authenticated=True, actor=f'{APP}[bot]',
+                                                                    repository=REPO)))
+        target = dict(pane_id='worker-pane', thread_id='worker-thread')
+        binding = target | {'cwd': str(self.home)}
+        settings = self.github_settings()
+        worker = settings.workers['implementer']
+        parameters = worker.prompt.parameters({'REPO': REPO, 'github_identity': APP, 'TASK': 'fixture'})
+        native = Native(self.home)
+        native.configure(settings)
+        def verify():
+            return native.setup_environment(worker, str(self.home), parameters, target=target, workspace='w1')
+
+        with patch.dict(os.environ, {'PATH': f'{self.home}{os.pathsep}{os.defpath}', 'XDG_CONFIG_HOME': str(controller)}):
+            subprocess.run([str(launcher), '--repo', REPO, 'status'], check=True, capture_output=True)
+            env = dict(os.environ, XDG_CONFIG_HOME=str(self.home / 'worker'))
+            native.agent = Mock(side_effect=lambda *args, payload: runtime_hook(payload, binding, env=env))
+            with self.assertRaisesRegex(Hold, 'Could not verify example-app'):
+                verify()
+            self.assertEqual(native.agent.call_args.args, ('setup-environment', 'w1', 'worker-pane', '--thread-id',
+                                                          'worker-thread', '--request-stdin'))
+            request = native.agent.call_args.kwargs['payload']
+            self.assertEqual(json.loads(request['stdin'])['parameters'], parameters)
+            reply = runtime_hook(request, binding, env=os.environ)
+            for evidence in (reply | {'binding': binding | {'thread_id': 'other-thread'}},
+                             reply | {'setup_receipt': None}):
+                native.agent = Mock(return_value=evidence)
+                with self.assertRaisesRegex(Hold, 'runtime could not verify'):
+                    verify()
+            native.agent = Mock(side_effect=Hold('transport_error', 'private runtime detail'))
+            with self.assertRaisesRegex(Hold, 'runtime could not verify') as refused:
+                verify()
+            self.assertNotIn('private runtime detail', str(refused.exception))
 
     def test_demo_example_renders_without_github_configuration(self):
         settings = Settings.read(self.home, self.demo)

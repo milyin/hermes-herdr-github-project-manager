@@ -121,3 +121,21 @@ skills:
             HEAD: null
             github_identity: your-app-slug
 ```
+
+## Update an existing GitHub profile
+
+Back up the selected profile's `config.yaml`. In `skills.config.hermes-herdr-github-project-manager`, add this field alongside `manager` and `workers`.
+
+```yaml
+setup_hook: skills/hermes-herdr-github-project-manager/workflows/github/setup_environment.py
+```
+
+If any of the three `prompt_file` values still use `doc/`, replace only those values. These examples are relative to the profile directory. For absolute paths, keep the checkout prefix and replace the part after it.
+
+| Previous path suffix | Current path suffix |
+| --- | --- |
+| `doc/MANAGER_PROMPT.md` | `workflows/github/MANAGER_PROMPT.md` |
+| `doc/IMPLEMENTER_PROMPT.md` | `workflows/github/IMPLEMENTER_PROMPT.md` |
+| `doc/REVIEWER_PROMPT.md` | `workflows/github/REVIEWER_PROMPT.md` |
+
+Keep the existing manager and worker records, parameter values, App configuration, models, working directories, launch profiles, and pane settings. Run `/project-manager` in that profile to validate the edited configuration. A managed turn starts only after its [bound runtime verifies the hook](../../doc/PROFILE.md#environment-setup-hooks).

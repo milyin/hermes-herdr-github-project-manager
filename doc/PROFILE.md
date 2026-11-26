@@ -47,11 +47,13 @@ Use `/project-manager` or Hermes cron history to verify the watchdog. A successf
 
 ## Environment setup hooks
 
-Set `setup_hook` in the project-manager configuration to register a trusted Python script for the selected workflow. Relative paths resolve from the Hermes profile. The engine runs the script in the agent's working directory during manager preparation and before managed manager turns, worker launches, and worker follow-ups. It sends a JSON object with `agent`, `backend`, `manager` (a boolean), `working_directory`, and `parameters` on standard input.
+Set `setup_hook` in the project-manager configuration to register a trusted Python script for the selected workflow. Relative paths resolve from the Hermes profile. The bound execution runtime runs the hook in the agent's working directory before a managed manager turn, the first worker turn, or a worker follow-up. The engine sends a JSON object with `agent`, `backend`, `manager` (a boolean), `working_directory`, and `parameters` on standard input.
 
 On success, write a single JSON object to standard output and exit zero. A prompt may reference hook output using `{{setup_NAME}}` placeholders. The `setup_` prefix is reserved for hook output. Return exactly those fields as strings, or return `{}` for a prompt with no hook values. Use non-secret values such as a verified command path. The engine records these values with the worker's run and checks them before a follow-up. Start a new worker run if they change.
 
 To block a turn, exit nonzero and return an `error` string in a JSON object. The engine reports it to the caller. Keep the hook safe to rerun and finish within 35 seconds.
+
+Hook-enabled workflows require a Hermes gateway and agent manager that support [bound environment verification](WORKFLOW.md#bound-environment-verification). If either runtime cannot verify its actual turn environment, the engine holds that turn. The worker pane attaches before its first check so the runtime can verify its working directory, launch profile and execution policy.
 
 ## Prompt files
 
