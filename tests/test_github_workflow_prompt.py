@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 import yaml
 
-from project_manager_engine.settings import SKILL, Settings
+from project_manager_engine.settings import SKILL, Prompt, Settings
 from workflows.github.github_app import GitHubError, main
 
 
@@ -34,10 +34,16 @@ REVIEWS = PR + '/reviews?per_page=100&page=1'
 NEXT_REVIEWS = PR + '/reviews?per_page=100&page=2'
 REVIEWER = {'login': 'reviewer', 'id': 2, 'type': 'User'}
 AUTHOR = {'login': 'author', 'id': 1, 'type': 'User'}
+DISPATCH_SECTIONS = ('Periodic turn', 'Shared scheduling', 'Worker queues and admission', 'Worker result')
 
 
 def review(state='APPROVED', *, number=1, head=HEAD, user=REVIEWER):
     return dict(id=number, state=state, commit_id=head, user=user, submitted_at='2026-11-26T10:00:00Z')
+
+
+def prompt_section(prompt, heading):
+    section, = re.findall(rf'^## {re.escape(heading)}\n(.*?)(?=^## |\Z)', prompt, re.MULTILINE | re.DOTALL)
+    return section.strip()
 
 
 class GitHubWorkflowPrompt(unittest.TestCase):
@@ -80,7 +86,7 @@ class GitHubWorkflowPrompt(unittest.TestCase):
         self.review_reads = 0
 
     def admission_policy(self, prompt, *observations):
-        section = prompt.split('## Worker queues and admission\n', 1)[1].split('## Merging conditions\n', 1)[0]
+        section = prompt_section(prompt, 'Worker queues and admission')
         rows = [line.strip('| ').split(' | ') for line in section.splitlines() if line.startswith('| ')]
         columns, _, *rules = rows
         for rule in rules:
@@ -88,6 +94,92 @@ class GitHubWorkflowPrompt(unittest.TestCase):
             if decision['Observation'] in observations:
                 return decision
         self.fail(f'No rendered admission rule matched {observations!r}')
+
+    def assert_dispatch_prose(self, prompt):
+        # The model sees the prose as well as the table. Guard the full dispatch sections
+        # so an additional instruction cannot silently contradict a checked table row.
+        fixture = Prompt.read(ROOT, 'workflow dispatch fixture', 'tests/fixtures/github_dispatch_prose.md',
+                              self.workflows.manager.prompt.defaults, manager=True).render()[0]
+        for heading in DISPATCH_SECTIONS:
+            lines = prompt_section(prompt, heading).splitlines()
+            prose = '\n'.join(line for line in lines if not line.startswith('| '))
+            prose = re.sub(r'\n{3,}', '\n\n', prose).strip()
+            self.assertMultiLineEqual(prompt_section(fixture, heading), prose, f'{heading} dispatch prose changed')
+
+    def test_dispatch_prose_matches_the_workflow_contract(self):
+        self.assert_dispatch_prose(self.workflows.manager.prompt.render()[0])
+
+    def test_dispatch_prose_rejects_conflicting_instructions_with_the_table_intact(self):
+        prompt = self.workflows.manager.prompt.render()[0]
+        mutations = (
+            'On a `capacity` refusal, move the issue to **Need attention** as a blocker.',
+            'On an `outcome_unknown` receipt, move the pending feedback to assigned.',
+            'On an `outcome_unknown` receipt, redispatch as soon as a slot is free, before reconciliation.',
+        )
+        observations = ('Capacity wait', 'Unresolved dispatch')
+        for heading in DISPATCH_SECTIONS:
+            for instruction in mutations:
+                with self.subTest(heading=heading, instruction=instruction):
+                    boundary = f'## {heading}\n\n'
+                    if heading == 'Worker queues and admission':
+                        boundary = '| Keep pending | Record intent and dispatch once |\n'
+                    mutated = prompt.replace(boundary, f'{boundary}{instruction}\n\n', 1)
+                    self.assertNotEqual(mutated, prompt)
+                    for observation in observations:
+                        self.assertEqual(self.admission_policy(mutated, observation),
+                                         self.admission_policy(prompt, observation))
+                    with self.assertRaisesRegex(AssertionError, f'{heading} dispatch prose changed'):
+                        self.assert_dispatch_prose(mutated)
+
+    def one_slot_trace(self, prompt, event, queued_hold):
+        def steps(heading):
+            return re.findall(r'^\d+\. \*\*([^\n*]+)\.\*\*', prompt_section(prompt, heading), re.MULTILINE)
+
+        slots = 1
+        trace = []
+        candidates = {'New issues': []}
+        result = dict(issue='A', pane_id='w1:p2', turn_id='completed-A')
+        placements = {'A': 'Review placement', 'B': 'Implementation placement'}
+        for step in steps(event):
+            if step == 'Read both queues':
+                candidates['Previously queued'] = ['B']
+            elif step in ('Refresh tracked work', 'Record the result'):
+                candidates['Other tracked work'] = ['A']
+                trace.append(('record pending', result['issue']))
+            elif step == 'Acknowledge the result':
+                trace.append(('mark-read', result['pane_id'], result['turn_id']))
+            elif step == 'Schedule work':
+                for priority in steps('Shared scheduling'):
+                    for issue in candidates[priority]:
+                        observations = ['Ready to dispatch' if slots else 'Capacity wait']
+                        if issue == 'B' and queued_hold:
+                            observations.append(queued_hold)
+                        decision = self.admission_policy(prompt, *observations)
+                        if decision['Next action'] == 'Record intent and dispatch once':
+                            trace.append(('dispatch', issue))
+                            slots -= 1
+                        else:
+                            trace.append((decision['Next action'], issue, decision[placements[issue]]))
+            else:
+                self.fail(f'Unexpected rendered step in {event}: {step}')
+        return trace
+
+    def test_both_paths_give_eligible_queued_work_the_one_slot_before_a_new_follow_up(self):
+        prompt = self.workflows.manager.prompt.render()[0]
+        for event, acknowledgement in (('Periodic turn', []),
+                                       ('Worker result', [('mark-read', 'w1:p2', 'completed-A')])):
+            with self.subTest(event=event):
+                self.assertEqual(self.one_slot_trace(prompt, event, queued_hold=None), [
+                    ('record pending', 'A'), *acknowledgement,
+                    ('dispatch', 'B'), ('Wait for capacity', 'A', 'In review → Queue'),
+                ])
+                for hold, action in (('Genuine blocker', 'Wait for resolution'),
+                                     ('Unresolved dispatch', 'Reconcile without dispatching')):
+                    with self.subTest(hold=hold):
+                        self.assertEqual(self.one_slot_trace(prompt, event, queued_hold=hold), [
+                            ('record pending', 'A'), *acknowledgement,
+                            (action, 'B', 'Need attention'), ('dispatch', 'A'),
+                        ])
 
     def assert_capacity_queues(self, prompt):
         decision = self.admission_policy(prompt, 'Capacity wait')
