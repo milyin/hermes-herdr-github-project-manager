@@ -57,7 +57,7 @@ class GitHubHandoff(unittest.TestCase):
             self.reviews: [[]],
             self.permission: dict(permission='write', user=HUMAN),
         }
-        mock = patch('project_manager_engine.github_app.subprocess.run', side_effect=self.respond)
+        mock = patch('project_manager_engine.github_handoff.subprocess.run', side_effect=self.respond)
         self.run = mock.start()
         self.addCleanup(mock.stop)
 
@@ -128,9 +128,9 @@ class GitHubHandoff(unittest.TestCase):
                 self.replies[self.permission] = permission
                 self.expect(AWAITING_APPROVAL, [self.status, self.pull, self.reviews, self.permission])
 
-    def test_exact_head_human_approval_can_only_handoff_to_human(self):
+    def test_exact_head_human_approval_marks_the_current_head_ready_to_merge(self):
         self.replies[self.reviews] = [[review(1, head=OLD_HEAD)], [review(2), review(3, state='COMMENTED')]]
-        result = self.expect('Awaiting human merge',
+        result = self.expect('Ready to merge',
                              [self.status, self.pull, self.reviews, self.permission, self.pull])
         self.assertEqual((result['head'], result['approver']), (HEAD, 'reviewer'))
 

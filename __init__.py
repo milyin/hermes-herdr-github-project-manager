@@ -4,12 +4,9 @@ import logging
 import threading
 from contextlib import suppress
 
-from .project_manager_engine.hermes_native import Native, ROOT
+from .project_manager_engine.hermes_native import Native, ROOT, TOOLSET
 from .project_manager_engine.interface import TOOLS, format_result, outcome, parse
-from .project_manager_engine.manager_policy import (
-    BLOCK, BRIDGE_TOOLS, DELEGATION_TOOLSET, SAFE_OPERATIONS, SAFE_TOOLS, TOOLSET, veto,
-)
-from .project_manager_engine.settings import Hold, github_workflow, raw_settings
+from .project_manager_engine.settings import Hold, raw_settings
 from .project_manager_engine.startup import profile_context, setup
 
 
@@ -43,16 +40,6 @@ def register(ctx):
     def bound(session_id):
         return bool(session_id and active() and Native(home).binding.get('session_id') == session_id)
 
-    def github_scope(session_id):
-        if not session_id or get_hermes_home().resolve() != home:
-            return None
-        binding = Native(home).binding
-        if binding.get('session_id') != session_id:
-            return None
-        if binding.get('github_scoped') is True:
-            return True
-        return False if github_workflow(raw_settings(home)) else None
-
     def command(text, **_):
         try:
             operation, args = parse(text)
@@ -71,13 +58,6 @@ def register(ctx):
     def make_handler(operation):
         def handler(args, session_id=None, **_):
             try:
-                scope = github_scope(session_id)
-                if scope is False:
-                    return json.dumps({'ok': False, 'error': {'code': 'manager_boundary_unverified',
-                                       'message': 'GitHub manager requires a verified scoped Hermes session'}})
-                if scope is True and operation not in SAFE_OPERATIONS:
-                    return json.dumps({'ok': False, 'error': {'code': 'manager_tool_denied',
-                                       'message': BLOCK['message']}})
                 authorized = bound(session_id)
             except Hold:
                 authorized = False
@@ -97,15 +77,11 @@ def register(ctx):
         name = f'project_manager_{operation}'
         schema = dict(name=name, description=description, parameters=dict(
             type='object', properties=properties, required=list(required), additionalProperties=False))
-        toolset = TOOLSET if operation in SAFE_OPERATIONS else DELEGATION_TOOLSET
-        ctx.register_tool(name, toolset, schema, make_handler(operation), check_fn=available)
+        ctx.register_tool(name, TOOLSET, schema, make_handler(operation), check_fn=available)
 
     def section(info):
         with suppress(Hold):
-            session_id = info.get('session_id')
-            if github_scope(session_id) is not None:
-                return 'Use the scoped project-manager tools for GitHub reads, the wiki dashboard and pane tracking.'
-            if bound(session_id):
+            if bound(info.get('session_id')):
                 return INSTRUCTIONS
         return ''
 
@@ -114,41 +90,18 @@ def register(ctx):
     tool_names = {f'project_manager_{operation}' for operation in TOOLS}
 
     def restrict_tools(request, session_id=None, **_):
-        try:
-            scope = github_scope(session_id)
-            if scope is False:
-                allowed = frozenset()
-            elif scope is True:
-                allowed = SAFE_TOOLS | BRIDGE_TOOLS
-            elif bound(session_id):
+        with suppress(Hold):
+            if bound(session_id):
                 return None
-            else:
-                allowed = None
-        except Hold:
-            allowed = frozenset()
         schemas = request.get('tools')
         if isinstance(schemas, list):
-            remaining = []
-            for schema in schemas:
-                definition = (schema.get('function') or schema) if isinstance(schema, dict) else {}
-                name = definition.get('name') if isinstance(definition, dict) else None
-                if isinstance(name, str) and (name in allowed if allowed is not None else name not in tool_names):
-                    remaining.append(schema)
+            remaining = [schema for schema in schemas if isinstance(schema, dict)
+                         and (schema.get('function') or schema).get('name') not in tool_names]
             if len(remaining) != len(schemas):
                 return {'request': dict(request, tools=remaining)}
         return None
 
-    def restrict_execution(tool_name='', args=None, session_id=None, **_):
-        try:
-            scope = github_scope(session_id)
-            if scope is False:
-                return BLOCK
-            return veto(tool_name, args) if scope is True else None
-        except Hold:
-            return BLOCK
-
     ctx.register_middleware('llm_request', restrict_tools)
-    ctx.register_hook('pre_tool_call', restrict_execution)
 
     def initialize(session_id, platform, **_):
         if platform not in ('tui', 'cli', 'desktop'):
