@@ -68,7 +68,7 @@ Run `APP_SLUG --repo OWNER/REPO schedule --implementer NAME --reviewer NAME` wit
 | `queued_at_start` | Ordered numeric issue IDs from both queues, captured before changing the dashboard and reused throughout the turn. |
 | `new_intake` | Numeric IDs of newly discovered issues on a periodic turn, even if an entry for one of them is created during the turn. |
 | `attempted` | Numeric issue IDs already sent to `run` or `steer` this turn. Start with an empty list. |
-| `capacity` | `result` from a successful `project_manager_capacity` call, including `available` and `workers`. Refresh after each attempt. |
+| `capacity` | Latest `result` from a successful `project_manager_capacity` call, including `available` and `workers`. Refresh after each attempt and after checking an intended checkout. |
 | `worker_result` | On a worker-result turn, the verified event's `pane_id` and `turn_id`. Set `recorded: true` after saving the result and its evidence. Set `acknowledgment` to the full `project_manager_mark_read` response once available. |
 | `entries` | One record per numeric issue, in dashboard order followed by new intake. |
 
@@ -82,8 +82,10 @@ Run `APP_SLUG --repo OWNER/REPO schedule --implementer NAME --reviewer NAME` wit
 | `feedback`, `pending_feedback`, `assigned_feedback` | Your interpretation of verified feedback (`clear`, `actionable`, or `unknown`), plus the pending and assigned lists of unique string IDs. Preserve source references on the dashboard. |
 | `pending_work` | `implementation` or `review` for explicit follow-up work, or null. |
 | `active_assignment`, `blocker` | Current verified assignment, with pane, turn and head when applicable, or null. Supply any verified worker or operator blocker as a short status string. Pass mergeability through `pull`. |
-| `handoff` | `kind`, `pr`, `head` (use null for a missing PR or head), and `feedback_ids` for the complete prepared prompt. Use null until the prompt and evidence match this work. An optional `steer` object contains the verified `issue`, `worker`, `pane_id`, `thread_id`, `turn_id` (null if no prior turn), `lock`, `state`, `pending_closure`, and `quota_ready` from a verified quota observation. |
-| `dispatch`, `receipt`, `recovery` | Persist the selected dispatch object before using the worker tool. Add `working_directory` for a new run. Pass the entire tool response as `receipt` for that recorded attempt. Use `recovery` only for verified evidence from the original binding. |
+| `handoff` | `kind`, `pr`, `head` (use null for a missing PR or head), and `feedback_ids` for the complete prepared prompt. Use null until the prompt and evidence match this work. For a run, `checkout` is the `result.preflight` from `project_manager_capacity` for the selected worker and working directory. An optional `steer` object contains the verified `issue`, `worker`, `pane_id`, `thread_id`, `turn_id` (null if no prior turn), `lock`, `state`, `pending_closure`, and `quota_ready` from a verified quota observation. |
+| `dispatch`, `receipt`, `recovery` | Persist the selected dispatch object before using the worker tool. Pass the entire tool response as `receipt` for that recorded attempt. Use `recovery` only for verified evidence from the original binding. |
+
+The scheduler may return `prepare_checkout` for the highest-priority item before it can authorize a run. Check the intended checkout and resubmit the snapshot. A `dispatch` for a run includes the preflighted `working_directory`. An open draft can receive eligible implementation follow-ups on its exact head. Review and merge wait until the PR is ready for review.
 
 A recovery record includes `issue`, `operation`, `worker`, `pr`, `head`, and `state` (`admitted` or `not_attempted`). For `run`, include the original `working_directory`. For `steer`, include the original `pane_id`, `thread_id`, and `previous_turn_id`. An admitted attempt includes the verified `pane_id` and `turn_id`, plus `thread_id` if the target binding is known. For a verified unsubmitted launch, set `launch_cleared: true` only after resolving any retained pane. A missing pane or a previous turn by itself leaves the original attempt unresolved.
 

@@ -117,6 +117,8 @@ def dispatch_outcome(attempt, receipt, recovery):
                                    (method == 'steer' and error['pane_id'] == attempt.get('pane_id'))):
             return 'capacity', None
         if error.get('admission') == 'not_attempted':
+            if method == 'run' and error.get('phase') == 'preflight':
+                return 'refused', None
             if method == 'run' and (error.get('pane_id') or code == 'partial_provision'):
                 return 'retained_launch', None
             if not error.get('pane_id') or error['pane_id'] == attempt.get('pane_id'):
@@ -153,7 +155,9 @@ def finish_dispatch(decision, entry, blocker):
     if outcome == 'capacity' and not blocker:
         return dict(decision, placement=ACTIVE[attempt['kind']] + QUEUE,
                     status='Waiting for a worker slot', action='wait_capacity')
-    return dict(decision, placement=ATTENTION, status=blocker or 'Worker refused dispatch', action='refresh')
+    error = (entry.get('receipt') or {}).get('error') or {}
+    reason = error.get('code') if error.get('phase') == 'preflight' else None
+    return dict(decision, placement=ATTENTION, status=blocker or reason or 'Worker refused dispatch', action='refresh')
 
 
 def target_work(entry, pull, current_verdict, names, new):
@@ -213,11 +217,13 @@ def decide(entry, capacity, names, event, attempted, new):
         return decision
     if blocker:
         return dict(decision, placement=ATTENTION, action='blocked', status=blocker)
-    if pr is not None and (not pull or pull['state'] != 'OPEN' or pull['isDraft'] is not False):
+    if pr is not None and (not pull or pull['state'] != 'OPEN'):
         return dict(decision, placement=ATTENTION, action='blocked', status='Awaiting a reviewable PR')
     current_verdict = bool(pull and verdict.get('pr') == pr and verdict.get('head') == pull['headRefOid']
                            and verdict.get('verdict') in ('clean', 'changes_requested'))
     target = target_work(entry, pull, current_verdict, names, new)
+    if pull and pull['isDraft'] is not False and (not target or target['kind'] == 'review'):
+        return dict(decision, placement=ATTENTION, action='blocked', status='Awaiting a reviewable PR')
     if pr is not None and entry.get('feedback') not in ('clear', 'actionable'):
         return dict(decision, placement=ATTENTION, action='blocked', status='Awaiting feedback verification')
     if target is None:
@@ -245,14 +251,20 @@ def decide(entry, capacity, names, event, attempted, new):
     dispatch = ready_handoff(target, entry)
     if dispatch is None:
         return dict(decision, placement=ATTENTION, action='prepare_handoff', status='Handoff incomplete')
+    checkout = (entry['handoff'].get('checkout') or {}) if dispatch['operation'] == 'run' else {}
+    checkout_matches = checkout.get('worker') == target['worker'] and text(checkout.get('working_directory'))
     if capacity['available'] == 0:
         return dict(decision, placement=ACTIVE[target['kind']] + QUEUE, action='wait_capacity',
                     status='Waiting for a worker slot')
-    worker = capacity['workers'].get(target['worker']) or {}
-    # Steer readiness comes from the verified idle binding plus quota preflight. Capacity's worker
-    # readiness also checks the default launch checkout, which is only used by a new run.
-    if dispatch['operation'] == 'run' and worker.get('ready') is not True:
-        return dict(decision, placement=ATTENTION, action='blocked', status=worker.get('hold') or 'Worker unavailable')
+    if dispatch['operation'] == 'run':
+        if not checkout_matches or checkout.get('hold') == 'capacity':
+            return dict(decision, action='prepare_checkout')
+        if checkout.get('ready') is not True or checkout.get('hold') is not None:
+            return dict(decision, placement=ATTENTION, action='blocked',
+                        status=checkout.get('hold') or 'Worker unavailable')
+        if not checkout['working_directory'].startswith('/'):
+            raise ValueError('Launch checkout must be an absolute directory')
+        dispatch['working_directory'] = checkout['working_directory']
     decision.update(action='ready', dispatch=dispatch)
     return decision
 
@@ -310,9 +322,13 @@ def plan(request, *, implementer, reviewer):
     if pending_result:
         return dict(worker_result=pending_result, decisions=decisions, dispatch=None)
     # Save reconciled receipts before selecting a dispatch against refreshed capacity and entries.
-    dispatch = None
+    result = dict(worker_result=None, decisions=decisions, dispatch=None)
     if not any(decision.get('clear_dispatch') for decision in decisions):
-        dispatch = next((decision['dispatch'] for decision in decisions if decision['action'] == 'ready'), None)
+        selected = next((decision for decision in decisions if decision['action'] in ('ready', 'prepare_checkout')), None)
+        if selected and selected['action'] == 'prepare_checkout':
+            result['prepare_checkout'] = dict(selected['pending_work'], issue=selected['issue'])
+        elif selected:
+            result['dispatch'] = selected['dispatch']
     for decision in decisions:
         decision.pop('dispatch', None)
-    return dict(worker_result=None, decisions=decisions, dispatch=dispatch)
+    return result

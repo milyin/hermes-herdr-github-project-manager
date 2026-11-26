@@ -10,6 +10,7 @@ H1 = 'a' * 40
 H2 = 'b' * 40
 IMPLEMENTER = 'impl-prod'
 REVIEWER = 'review-prod'
+CHECKOUT = '/fixture/checkout'
 
 
 def facts(head=H2, *, pr=26, mergeable='MERGEABLE', **changes):
@@ -18,7 +19,9 @@ def facts(head=H2, *, pr=26, mergeable='MERGEABLE', **changes):
 
 
 def handoff(kind='review', *, pr=26, head=H2, feedback=(), **changes):
-    return dict(kind=kind, pr=pr, head=head, feedback_ids=list(feedback)) | changes
+    worker = REVIEWER if kind == 'review' else IMPLEMENTER
+    return dict(kind=kind, pr=pr, head=head, feedback_ids=list(feedback),
+                checkout=dict(worker=worker, working_directory=CHECKOUT, ready=True, hold=None)) | changes
 
 
 def issue(number=25, **changes):
@@ -72,7 +75,8 @@ class GitHubScheduler(unittest.TestCase):
 
                 ready = schedule(new)
                 self.assertEqual(ready['dispatch'], dict(issue=25, kind='review', pr=26, head=H2,
-                                                         worker=REVIEWER, operation='run', feedback_ids=[]))
+                                                         worker=REVIEWER, operation='run', feedback_ids=[],
+                                                         working_directory=CHECKOUT))
                 self.assertEqual(ready['decisions'][0]['placement'], 'Need attention')
                 self.assertIsNone(ready['decisions'][0]['approval_hold'])
                 admitted = schedule(new | dict(dispatch=dict(ready['dispatch'], working_directory='/fixture/h2'),
@@ -123,6 +127,42 @@ class GitHubScheduler(unittest.TestCase):
         self.assertIsNone(cleared['merge_blocker'])
         self.assertEqual(cleared['status'], 'Awaiting merge verification')
         self.assertEqual(cleared['merge_candidate'], dict(pr=26, head=H2))
+
+    def test_draft_allows_implementation_and_holds_review_and_merge_on_both_paths(self):
+        review = issue(placement='In review → Queue', pull=facts(isDraft=True))
+        clean_verdict = dict(pr=26, head=H2, verdict='clean')
+        for report in (None, result(acknowledgment=acknowledged())):
+            with self.subTest(report=report):
+                follow_up = review | dict(placement='In progress → Queue', pending_work='implementation',
+                                          feedback='actionable', pending_feedback=['fix'],
+                                          handoff=handoff('implementation', feedback=['fix']))
+                dispatch = schedule(follow_up, queued=(25,), report=report)['dispatch']
+                self.assertEqual((dispatch['pr'], dispatch['head'], dispatch['worker']), (26, H2, IMPLEMENTER))
+                self.assertEqual(dispatch['feedback_ids'], ['fix'])
+                for entry in (review, review | dict(verdict=clean_verdict), follow_up | dict(pull=facts(state='CLOSED'))):
+                    held = schedule(entry, queued=(25,), report=report)
+                    self.assertIsNone(held['dispatch'])
+                    self.assertEqual(held['decisions'][0]['status'], 'Awaiting a reviewable PR')
+                    self.assertNotIn('merge_candidate', held['decisions'][0])
+
+    def test_checkout_preflight_preserves_priority_and_real_holds_on_both_paths(self):
+        queued = issue(placement='In review → Queue', handoff=handoff(checkout=None))
+        other = issue(12)
+        for report in (None, result(acknowledgment=acknowledged())):
+            with self.subTest(report=report):
+                waiting = schedule(other, queued, queued=(25,), report=report)
+                self.assertIsNone(waiting['dispatch'])
+                self.assertEqual(waiting['prepare_checkout'], dict(issue=25, kind='review', worker=REVIEWER, pr=26, head=H2))
+                for reason in ('directory_in_use', 'invalid_directory', 'quota_behind_pace', 'worker_unavailable'):
+                    checkout = dict(worker=REVIEWER, working_directory=CHECKOUT, ready=False, hold=reason)
+                    held = schedule(other, queued | dict(handoff=handoff(checkout=checkout)), queued=(25,), report=report)
+                    self.assertEqual(held['decisions'][0]['status'], reason)
+                    self.assertEqual(held['dispatch']['issue'], 12)
+                wrong_worker = queued | dict(handoff=handoff(checkout=handoff('implementation')['checkout']))
+                self.assertEqual(schedule(wrong_worker, report=report)['prepare_checkout']['worker'], REVIEWER)
+                stale = dict(worker=REVIEWER, working_directory=CHECKOUT, ready=False, hold='capacity')
+                refresh = schedule(queued | dict(handoff=handoff(checkout=stale)), report=report)
+                self.assertEqual(refresh['prepare_checkout']['issue'], 25)
 
     def test_unconfirmed_checked_merge_and_pending_feedback_hold_the_merge_candidate(self):
         clean = issue(verdict=dict(pr=26, head=H2, verdict='clean'))

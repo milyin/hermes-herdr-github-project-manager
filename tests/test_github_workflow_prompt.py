@@ -173,8 +173,9 @@ class GitHubWorkflowPrompt(unittest.TestCase):
         self.assertIn('Only the top-level `dispatch` authorizes a worker call.', prompt)
         self.assertIn('before calling `project_manager_run` or `project_manager_steer`', prompt)
 
+        checkout = dict(worker='review-prod', working_directory='/fixture/checkout', ready=True, hold=None)
         entry = dict(issue=12, pr=14, pull=facts, placement='In review → Queue', eligible=True, feedback='clear',
-                     pending_feedback=[], handoff=dict(kind='review', pr=14, head=HEAD, feedback_ids=[]))
+                     pending_feedback=[], handoff=dict(kind='review', pr=14, head=HEAD, feedback_ids=[], checkout=checkout))
         request = dict(queued_at_start=[12], entries=[entry], capacity=dict(available=1, workers={'review-prod': {
             'ready': True,
         }}))

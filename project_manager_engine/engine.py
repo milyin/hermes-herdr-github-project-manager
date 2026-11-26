@@ -364,23 +364,37 @@ class Engine:
         except OSError as exc:
             raise Hold('invalid_work_root', 'Managed work root must be an existing directory without symlinks') from exc
 
-    def capacity(self):
+    def preflight_run(self, setting, cwd):
+        if cwd is None:
+            self.preflight_root(setting)
+        else:
+            self.check_work_cwd(cwd)
+            self.native.preflight(setting, cwd)
+
+    def capacity(self, worker=None, working_directory=None):
+        if (worker is None) != (working_directory is None):
+            raise Hold('invalid_arguments', 'Worker and working directory must be supplied together')
+        return self.worker_capacity(worker, working_directory)
+
+    def worker_capacity(self, worker=None, working_directory=None, *, discovery=False):
+        settings = self.settings.workers.values() if worker is None else (self.worker(worker),)
         layout = self.layout()
         rows = self.worker_rows(layout)
         slots = self.worker_slots(rows)
         quota = self.quota()
         held = {name: account['hold'] for account in quota['accounts'] for name in account['workers']}
         ready = {}
-        for setting in self.settings.workers.values():
+        for setting in settings:
+            cwd = setting.cwd if worker is None else working_directory
             reason = 'capacity' if not slots['available'] else held.get(setting.name)
             if not reason:
                 try:
-                    self.check_directory(setting.cwd, rows)
-                    if setting.work_root:
-                        self.preflight_root(setting)
-                    else:
-                        self.check_work_cwd(setting.cwd)
-                        self.native.preflight(setting, setting.cwd)
+                    if worker is not None:
+                        cwd = directory(cwd)
+                    # A discovery turn can choose a different directory. Unknown directory
+                    # ownership, worker prerequisites, and quota still hold discovery.
+                    self.check_directory(None if discovery else cwd, rows)
+                    self.preflight_run(setting, cwd)
                 except Hold as exc:
                     reason = exc.code
             ready[setting.name] = dict(ready=reason is None, hold=reason)
@@ -398,6 +412,8 @@ class Engine:
                     {key: record[key] for key in ('instance', 'workspace_id', 'pane_id', 'terminal_id', 'worker', 'thread_id')},
                     admission='unknown', presence=presence))
         result = dict(slots, occupied=list(slots['occupied_states']), workers=ready, unresolved_launches=unresolved)
+        if worker is not None:
+            result['preflight'] = dict(worker=worker, working_directory=cwd, **ready[worker])
         if self.work.records:
             result['managed_work'] = [
                 dict(path=str(self.work.path(key)), worker=record['worker'], workspace_id=record['workspace_id'],
@@ -467,15 +483,15 @@ class Engine:
                            admission='accepted')
             raise Hold('outcome_unknown', 'This initial prompt already has an unverified submission',
                        pane_id=record['pane_id'], workspace_id=record['workspace_id'], admission='unknown')
-        if cwd is None:
-            self.preflight_root(setting)
-        else:
-            self.check_work_cwd(cwd)
-            self.native.preflight(setting, cwd)
-        self.workspace(create=True)
-        rows = self.panes(role='worker')['panes']
-        account = self.check_admission(setting, rows=rows)
-        self.check_directory(cwd, rows)
+        try:
+            self.preflight_run(setting, cwd)
+            self.workspace(create=True)
+            rows = self.panes(role='worker')['panes']
+            account = self.check_admission(setting, rows=rows)
+            self.check_directory(cwd, rows)
+        except Hold as exc:
+            exc.details.update(phase='preflight', admission='not_attempted')
+            raise
         work_key = None
         if cwd is None:
             work_key = self.work.allocate(setting, self.settings.instance, self.workspace_id)
@@ -809,9 +825,9 @@ class Engine:
         if report:
             slots = self.worker_slots(row for row in refreshed if row['role'] == 'worker')
         else:
-            capacity = self.capacity()
+            capacity = self.worker_capacity(discovery=True)
             ready = any(worker['ready'] for worker in capacity['workers'].values())
-            # Quota and preflight probes can outlive the worker observations used by capacity().
+            # Quota and preflight probes can outlive the initial worker observations.
             slots = (self.worker_slots(self.worker_rows(self.layout())) if ready else
                      {key: capacity[key] for key in ('maximum', 'available', 'occupied_states')})
             if not ready or not slots['available']:
