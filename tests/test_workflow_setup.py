@@ -7,6 +7,7 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from typing import cast
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -18,7 +19,8 @@ from workflows.github.ensure_github_label import ensure_label
 
 ROOT = Path(__file__).resolve().parents[1]
 REPO = 'owner/repository'
-APP = 'example-app'
+APP = '/absolute/path/to/profile/bin/example-app'
+ACTOR = f'{Path(APP).name}[bot]'
 LABEL = 'hermes:projectmanager'
 
 
@@ -40,20 +42,23 @@ class BundledWorkflows(unittest.TestCase):
                 agent['working_directory'] = str(self.home)
 
     def test_github_example_renders_scoped_commands_for_all_roles(self):
-        self.github['manager']['parameters']['github_identity'] = APP
+        launcher = self.github['manager']['parameters']['github_identity']
+        self.assertTrue(Path(launcher).is_absolute())
+        for worker in self.github['workers']:
+            self.assertEqual(worker['parameters']['github_identity'], launcher)
         self.github['manager']['parameters']['REPO'] = REPO
         settings = Settings.read(self.home, self.github)
         manager, _ = settings.manager.prompt.render()
         implementer, _ = settings.workers['implementer'].prompt.render(
-            {'github_identity': APP, 'REPO': REPO, 'TASK': 'Implement the issue'})
+            {'REPO': REPO, 'TASK': 'Implement the issue'})
         reviewer, _ = settings.workers['reviewer'].prompt.render(
-            {'github_identity': APP, 'REPO': REPO, 'ISSUE': '6', 'PR': '7', 'HEAD': 'a' * 40})
+            {'REPO': REPO, 'ISSUE': '6', 'PR': '7', 'HEAD': 'a' * 40})
         for prompt in (manager, implementer, reviewer):
             for action in ('gh', 'git'):
-                self.assertIn(f'{APP} --repo {REPO} {action}', prompt)
-            self.assertNotIn(f'{APP} --repo {REPO} status', prompt)
+                self.assertIn(f'{launcher} --repo {REPO} {action}', prompt)
+            self.assertIn('Do not search PATH for a replacement', prompt)
             self.assertIn('Do not use personal accounts', prompt)
-        self.assertIn(f'Pass `github_identity` as `{APP}` to both workers', manager)
+        self.assertIn(f'Pass `github_identity` as `{launcher}` to both workers', manager)
 
     def test_demo_example_renders_without_github_configuration(self):
         settings = Settings.read(self.home, self.demo)
@@ -188,11 +193,17 @@ class OptInLabel(unittest.TestCase):
         run = patch('workflows.github.ensure_github_label.subprocess.run')
         self.run = run.start()
         self.addCleanup(run.stop)
-        self.status = SimpleNamespace(stdout=json.dumps({'authenticated': True, 'actor': f'{APP}[bot]',
+        self.status = SimpleNamespace(stdout=json.dumps({'authenticated': True, 'actor': ACTOR,
                                                         'repository': REPO, 'permissions': {'contents': 'write'}}))
 
     def commands(self):
         return [call.args[0] for call in self.run.call_args_list]
+
+    def test_bare_app_slug_never_searches_path(self):
+        cast(Mock, self.run).side_effect = [self.status, SimpleNamespace(stdout=json.dumps(LABEL))]
+        with self.assertRaisesRegex(ValueError, 'absolute'):
+            ensure_label(REPO, Path(APP).name, LABEL)
+        self.assertEqual(self.commands(), [])
 
     def test_only_creates_a_missing_label(self):
         self.run.side_effect = [self.status, SimpleNamespace(stdout='"another label"\n'), SimpleNamespace(stdout='')]
@@ -212,7 +223,7 @@ class OptInLabel(unittest.TestCase):
         self.assertEqual(self.commands(), [[*self.prefix, 'status']])
 
     def test_setup_requires_contents_write_before_label_operations(self):
-        status = {'authenticated': True, 'actor': f'{APP}[bot]', 'repository': REPO}
+        status = {'authenticated': True, 'actor': ACTOR, 'repository': REPO}
         for permissions in ({'contents': 'read', 'issues': 'write'}, {}):
             with self.subTest(permissions=permissions):
                 self.run.reset_mock()
