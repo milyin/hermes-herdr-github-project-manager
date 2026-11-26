@@ -80,7 +80,8 @@ def verification(job):
 
 
 def setup(home):
-    from cron.jobs import create_job, list_jobs, parse_schedule, update_job
+    from cron.jobs import list_jobs, parse_schedule, update_job
+    from cron.scheduler import CronSchedulerRegistrationError, create_job_with_scheduler_registration
     from hermes_cli.gateway_runtime import attachable, ensure_gateway_runtime
     with profile_context(home), profile_lock(home):
         raw = raw_settings(home)
@@ -94,8 +95,12 @@ def setup(home):
         if len(jobs) > 1:
             raise Hold('watchdog_ambiguous', 'The profile has multiple project-manager watchdog jobs')
         if not jobs:
-            job = create_job(prompt=None, schedule=SCHEDULE, name=WATCHDOG, script=SCRIPT,
-                             no_agent=True, deliver='local', interpreter=sys.executable, catch_up=False)
+            try:
+                job = create_job_with_scheduler_registration(
+                    prompt=None, schedule=SCHEDULE, name=WATCHDOG, script=SCRIPT, no_agent=True,
+                    deliver='local', interpreter=sys.executable, catch_up=False)
+            except CronSchedulerRegistrationError as exc:
+                raise Hold('watchdog_registration_failed', exc.user_message(), job_id=exc.job['id']) from exc
         else:
             job = jobs[0]
             if (job.get('script') != SCRIPT or not job.get('no_agent') or not job.get('enabled')
