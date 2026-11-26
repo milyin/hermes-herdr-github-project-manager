@@ -4,12 +4,19 @@ import json
 import shlex
 
 from .engine import COMMANDS, Engine
+from .github_handoff import github_handoff
 from .hermes_native import Native
-from .settings import Hold
+from .settings import Hold, Settings, raw_settings
 
 
 def outcome(home, command, args):
     try:
+        if command == 'github_handoff':
+            raw = raw_settings(home)
+            if raw.get('enabled') is not True:
+                raise Hold('disabled', 'Enable project management in the selected Hermes profile')
+            manager = Settings.read(home, raw).manager
+            return {'ok': True, 'result': github_handoff(manager.prompt.defaults, **args)}
         return {'ok': True, 'result': Engine(home, Native(home)).execute(command, **args)}
     except Hold as exc:
         return {'ok': False, 'error': exc.as_dict()}
@@ -44,6 +51,10 @@ TOOLS = {
     'panes': ('Inspect live manager and worker panes, optionally filtering the results.', (), FILTERS),
     'capacity': ('Check available worker slots and launch readiness.', (), {}),
     'quota': ('Inspect quota observations and holds for configured worker accounts.', (), bulk_properties('worker')),
+    'github_handoff': ('Read the GitHub wiki handoff status for a PR and its clean worker-reviewed head. '
+                       'All merge actions belong to a human.',
+                       ('pr', 'reviewed_head'), {'pr': {'type': 'integer', 'minimum': 1},
+                                                 **bulk_properties('reviewed_head')}),
 }
 class Parser(argparse.ArgumentParser):
     def error(self, message):
@@ -53,7 +64,7 @@ class Parser(argparse.ArgumentParser):
 def parser():
     cli = Parser(prog='/project-manager', allow_abbrev=False, add_help=False)
     ops = cli.add_subparsers(dest='command')
-    for command in COMMANDS:
+    for command in (*COMMANDS, 'github_handoff'):
         command_config = ops.add_parser(command.replace('_', '-'), allow_abbrev=False, add_help=False)
         if command == 'run':
             command_config.add_argument('name')
@@ -74,6 +85,9 @@ def parser():
                 command_config.add_argument('--' + option, dest=name, choices=schema.get('enum'))
         if command == 'quota':
             command_config.add_argument('--worker')
+        if command == 'github_handoff':
+            command_config.add_argument('pr', type=int)
+            command_config.add_argument('reviewed_head')
     return cli
 
 

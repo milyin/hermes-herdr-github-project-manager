@@ -12,6 +12,14 @@ The manager runs the workflow in a Hermes gateway session displayed in the termi
 
 Provide one implementation for each operation and use it from Hermes commands, manager tools and cron. They share the same profile binding, observations, guards and result fields. In particular, manual inspection and cron use the same pane, quota, and capacity queries.
 
+## Human merge handoff
+
+The bundled GitHub workflow hands merges to a human. Its handoff operation uses fixed read commands for the PR, submitted reviews, and reviewer permissions. The general App helper has write permissions for publishing wiki updates and opening or updating pull requests. This credential setup does not enforce an approval requirement across GitHub's merge writes, so the bundled workflow provides no direct merge, auto-merge, or merge queue admission operation.
+
+After a clean worker verdict, the manager checks for outstanding feedback and calls the handoff operation with the exact reviewed head. The operation checks the current head, reads all review pages, and looks for an active `APPROVED` review on that SHA from an operator-verified human account with current repository write access. GitHub's account type helps exclude bots. The operator's reviewer list also excludes service accounts that use ordinary GitHub logins. The PR author, comments, pending reviews, superseded or dismissed approvals, and approvals of a different SHA cannot clear **Awaiting human approval** in **Need attention**. Failed GitHub reads keep that status as well. [GitHub review history](https://docs.github.com/en/rest/pulls/reviews#list-reviews-for-a-pull-request) · [GitHub collaborator permissions](https://docs.github.com/en/rest/collaborators/collaborators#get-repository-permissions-for-a-user)
+
+Immediately before merging or using the queue, the operator verifies the clean worker verdict and eligible approval for the exact current SHA, applicable GitHub checks and rules, and absence of outstanding feedback. The dashboard reports evidence from its last read. A changed head needs a fresh worker review and a submitted human approval for that SHA. The manager moves the task to **Done** and closes its panes after GitHub reports the merge.
+
 ## Manager conversation
 
 Open the selected profile's Hermes TUI in the manager pane. Group it with the workspace's initial shell when layout permits so zoom is available from first launch. The profile gateway runs the turns and owns the conversation. The TUI lets the operator view the transcript and talk to the manager. The watchdog connects through the authenticated local gateway interface to submit scheduled instructions and worker results into that same conversation. [Hermes TUI gateway](https://hermes-agent.nousresearch.com/docs/user-guide/tui#how-the-tui-talks-to-its-gateway)

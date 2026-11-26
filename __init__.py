@@ -22,7 +22,7 @@ INSTRUCTIONS = (
 )
 HELP = (
     '/project-manager run, steer, query, mark-read, set-comment, close, workers, panes, capacity, quota, '
-    'prepare-panes, tick'
+    'github-handoff, prepare-panes, tick'
 )
 
 

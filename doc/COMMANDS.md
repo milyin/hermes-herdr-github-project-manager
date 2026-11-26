@@ -18,8 +18,11 @@ Hermes gives the bound manager gateway session these registered tools and their 
 | `project_manager_panes` | Optional `role`, `worker`, `pane_id`, `state`, `delivery`, `presence`, and `lock` filters. |
 | `project_manager_capacity` | None. |
 | `project_manager_quota` | Optional `worker`. |
+| `project_manager_github_handoff` | `pr` number and `reviewed_head` full SHA. Uses the manager's configured GitHub repository, App and human reviewer list. |
 
 Pane preparation and `tick` are available through the operator commands and cron. The manager uses the tools above within its turn.
+
+`/project-manager github-handoff PR REVIEWED_HEAD` reads the same GitHub evidence as the manager tool. It returns a wiki section and status for the manual handoff. [Human merge handoff](WORKFLOW.md#human-merge-handoff)
 
 ## Worker commands
 

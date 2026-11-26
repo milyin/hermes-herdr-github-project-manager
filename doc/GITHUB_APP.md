@@ -16,6 +16,8 @@ milyin-hermes --repo OWNER/REPO git ls-remote https://github.com/OWNER/REPO.wiki
 
 The wiki `git ls-remote` command verifies read access only. The scoped App status supplies the required write permission check. Keep the main repository as the wrapper scope for wiki Git operations. If the helper is missing, the status check fails, or the App is denied access, stop the affected work and report the failure. Do not fall back to a personal login, token, credential helper, or GitHub connector.
 
+The bundled workflow uses PR review and collaborator permission reads to prepare a [human merge handoff](WORKFLOW.md#human-merge-handoff). An unavailable read leaves the PR in **Need attention** with **Awaiting human approval**. A person uses GitHub to perform the merge after verifying the current approval and applicable rules.
+
 ## Opt-in label
 
 Run this command from the installed project-manager checkout after the operator confirms the repository, App, and label. Substitute the operator's selected values. The script rechecks the App identity, repository, and Contents write permission before reading all label pages and creating the label if absent. It prints the label's name for the manager's `LABEL` parameter.
