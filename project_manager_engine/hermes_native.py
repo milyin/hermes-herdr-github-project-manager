@@ -91,6 +91,10 @@ class Native:
         try:
             child = subprocess.run(argv, input=data, capture_output=True, encoding='utf-8',
                                    env=dict(os.environ, HERMES_HOME=str(self.home)), timeout=timeout)
+            if (child.returncode == 2 and any(arg.startswith('--reasoning-effort=') for arg in argv)
+                    and 'unrecognized arguments: --reasoning-effort=' in (child.stderr or '')):
+                raise Hold('launch_reasoning_effort_unavailable',
+                           'The installed agent manager does not support setting worker reasoning_effort at launch')
             reply = json.loads(child.stdout)
             if not isinstance(reply, dict):
                 raise ValueError
@@ -131,14 +135,20 @@ class Native:
     def launch_options(profile):
         return ['--launch-profile', profile] if profile else []
 
+    def worker_launch_options(self, worker):
+        options = self.launch_options(worker.launch_profile)
+        if worker.reasoning_effort is not None:
+            options.append(f'--reasoning-effort={worker.reasoning_effort}')
+        return options
+
     def preflight(self, worker, cwd):
         return self.agent('preflight', None, None, '--agent', worker.backend, '--cwd', cwd,
-                          '--model', worker.model, *self.launch_options(worker.launch_profile))
+                          '--model', worker.model, *self.worker_launch_options(worker))
 
     def provision(self, workspace, worker, cwd):
         return self.agent('provision', workspace, None, '--agent', worker.backend, '--worker',
                           worker.name, '--model', worker.model, '--cwd', cwd, '--group', GROUP,
-                          '--status', f'{worker.tag}:START', *self.launch_options(worker.launch_profile))
+                          '--status', f'{worker.tag}:START', *self.worker_launch_options(worker))
 
     def quota(self, launch_profile):
         return self.agent('account-quota', None, None, *self.launch_options(launch_profile))

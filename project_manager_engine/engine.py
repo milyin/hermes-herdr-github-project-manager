@@ -20,7 +20,7 @@ MAX_WORKER_PROMPT_BYTES = 32 * 1024
 # The receiver reports deadline_elapsed before any prompt bytes are written.
 # Partial writes, reply deadlines and failures after admission use other codes.
 RUN_REFUSALS = {'user_locked', 'lock_unknown', 'worker_unavailable', 'turn_active', 'already_started',
-                'invalid_config', 'invalid_prompt', 'invalid_parameters', 'quota_account_changed', 'quota_unavailable',
+                'invalid_prompt', 'invalid_parameters', 'quota_account_changed', 'quota_unavailable',
                 'quota_behind_pace', 'quota_exhausted', 'receiver_unavailable', 'codex_rejected', 'deadline_elapsed'}
 
 
@@ -56,12 +56,6 @@ def validate_worker_prompt(prompt):
 
 def fingerprint(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
-
-
-def require_turn_model_options(report, worker):
-    if worker.reasoning_effort is not None and report.get('turn_model_options') is not True:
-        raise Hold('turn_model_options_unavailable',
-                   'The agent manager and worker receiver must support per-turn reasoning_effort', worker=worker.name)
 
 
 def issued(reply, pane, thread=None):
@@ -217,8 +211,7 @@ class Engine:
                 if reply.get('worker') != worker.name or reply.get('agent') != worker.backend:
                     raise Hold('binding_changed', 'The pane is bound to a different worker')
                 answer.update({key: reply[key] for key in ('state', 'thread_id', 'turn_id', 'completed_at',
-                               'working_directory', 'attention', 'active', 'recoverable',
-                               'turn_model_options') if key in reply})
+                               'working_directory', 'attention', 'active', 'recoverable') if key in reply})
                 attention = answer.get('attention')
                 if attention:
                     mark_code, _, attention_id = mark.partition(':')
@@ -368,23 +361,9 @@ class Engine:
         self.check_work_cwd(setting.work_root)
         try:
             with open_root(setting.work_root):
-                self.preflight(setting, setting.work_root)
+                self.native.preflight(setting, setting.work_root)
         except OSError as exc:
             raise Hold('invalid_work_root', 'Managed work root must be an existing directory without symlinks') from exc
-
-    def preflight(self, setting, cwd, *, turn_model_options=False):
-        report = self.native.preflight(setting, cwd)
-        require_turn_model_options(report, setting)
-        if turn_model_options and report.get('turn_model_options') is not True:
-            raise Hold('turn_model_options_unavailable', 'The agent-manager launcher lacks per-turn model support')
-        if setting.reasoning_effort is not None:
-            efforts = report.get('reasoning_efforts')
-            if not isinstance(efforts, list) or not all(identifier(effort) for effort in efforts):
-                raise Hold('invalid_response', 'The agent manager did not report the model’s reasoning efforts')
-            if setting.reasoning_effort not in efforts:
-                raise Hold('invalid_config',
-                           f'Worker {setting.name}.reasoning_effort {setting.reasoning_effort!r} '
-                           f'is unsupported by model {setting.model!r}. Supported values: {", ".join(efforts) or "none"}')
 
     def capacity(self):
         layout = self.layout()
@@ -402,7 +381,7 @@ class Engine:
                         self.preflight_root(setting)
                     else:
                         self.check_work_cwd(setting.cwd)
-                        self.preflight(setting, setting.cwd)
+                        self.native.preflight(setting, setting.cwd)
                 except Hold as exc:
                     reason = exc.code
             ready[setting.name] = dict(ready=reason is None, hold=reason)
@@ -493,7 +472,7 @@ class Engine:
             self.preflight_root(setting)
         else:
             self.check_work_cwd(cwd)
-            self.preflight(setting, cwd)
+            self.native.preflight(setting, cwd)
         self.workspace(create=True)
         rows = self.panes(role='worker')['panes']
         account = self.check_admission(setting, rows=rows)
@@ -517,7 +496,6 @@ class Engine:
             if (row['lock'] != 'unlocked' or row.get('native_state') != 'idle' or row['pending_closure']
                     or 'turn_id' not in row or row['turn_id'] is not None or row.get('active') is not False):
                 raise Hold('worker_unavailable', 'The provisioned worker is unavailable for first submission')
-            require_turn_model_options(row, setting)
         except Hold as exc:
             details = dict(exc.details, admission='not_attempted', phase='provision', workspace_id=self.workspace_id)
             if identifier(pane):
@@ -536,8 +514,6 @@ class Engine:
             raise Hold('launch_record_unavailable', 'Could not record the initial prompt before sending it',
                        pane_id=pane, admission='not_attempted', phase='submission') from exc
         try:
-            if row.get('turn_model_options') is True:
-                body['reasoning_effort'] = setting.reasoning_effort
             reply = self.agent('run', pane, '--agent', setting.backend, '--cwd', cwd,
                                '--model', setting.model, '--request-stdin', payload=dict(body, account=account))
             receipt = issued(reply, pane, thread)
@@ -580,13 +556,7 @@ class Engine:
                 or row['pending_closure']):
             raise Hold('not_idle', 'The bound worker pane is unavailable for a follow-up', pane_id=pane_id)
         worker = self.worker(row['worker'])
-        require_turn_model_options(row, worker)
-        if row.get('turn_model_options') is True:
-            self.preflight(worker, directory(row.get('working_directory')), turn_model_options=True)
         account = self.check_admission(worker)
-        body = dict(prompt=prompt, account=account)
-        if row.get('turn_model_options') is True:
-            body.update(model=worker.model, reasoning_effort=worker.reasoning_effort)
         if launch := self.pane_launch(pane_id):
             self.finish_launch(launch, row)
         self.rename(pane_id, 'status', f'{worker.tag}:RUN')
@@ -596,7 +566,7 @@ class Engine:
             self.work.update(key, turn_id=None)
         try:
             reply = self.agent('steer', pane_id, '--thread-id', row['thread_id'], '--return-admission',
-                               '--request-stdin', payload=body)
+                               '--request-stdin', payload={'prompt': prompt, 'account': account})
             receipt = issued(reply, pane_id, row['thread_id'] if key else None)
         except Hold as exc:
             if exc.code not in ('outcome_unknown', 'transport_error', 'invalid_response',

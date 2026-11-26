@@ -141,41 +141,29 @@ class Contract(unittest.TestCase):
         text = yaml.safe_dump({'skills': {'config': {SKILL: self.config}}})
         (self.home / 'config.yaml').write_text(text)
 
-    def test_first_turn_passes_configured_reasoning_effort(self):
-        self.config['workers'][0]['reasoning_effort'] = 'high'
-        self.save()
-        self.native.result['turn_model_options'] = True
-        with (patch.object(self.native, 'preflight', return_value=dict(
-                  turn_model_options=True, reasoning_efforts=['medium', 'high'])),
-              patch.object(self.native, 'agent', wraps=self.native.agent) as agent):
-            receipt = self.engine.execute('run', name='worker', parameters={'TASK': 'fixture'})
-
-        call = next(call for call in agent.call_args_list if call.args[0] == 'run')
-        self.assertEqual(call.args[-3:], ('--model', 'test', '--request-stdin'))
-        self.assertEqual(call.kwargs['payload']['reasoning_effort'], 'high')
-        self.assertEqual(receipt['admission'], 'accepted')
-
-    def test_followup_reloads_model_and_effort_and_restores_default(self):
+    def test_new_worker_starts_with_latest_model_and_reasoning_effort(self):
+        self.managed_root()
         worker = self.config['workers'][0]
         worker['reasoning_effort'] = 'high'
         self.save()
-        self.native.rows.append(self.native.worker)
-        self.native.result['turn_model_options'] = True
-        with (patch.object(self.native, 'preflight', return_value=dict(
-                  turn_model_options=True, reasoning_efforts=['medium', 'high'])),
+        with (patch.object(self.native, 'preflight', wraps=self.native.preflight) as preflight,
+              patch.object(self.native, 'provision', wraps=self.native.provision) as provision,
               patch.object(self.native, 'agent', wraps=self.native.agent) as agent):
-            self.engine.execute('steer', pane_id='w1:p2', prompt='First follow-up')
+            self.managed_run(prompt='First task')
+            self.finish_managed()
             worker.update(model='new-model', reasoning_effort='medium')
             self.save()
-            self.engine.execute('steer', pane_id='w1:p2', prompt='Updated follow-up')
-            del worker['reasoning_effort']
-            self.save()
-            self.engine.execute('steer', pane_id='w1:p2', prompt='Use the default')
+            self.engine.execute('steer', pane_id='w1:p2', prompt='Continue existing work')
+            self.close_managed()
+            self.managed_run(prompt='Next task')
 
-        submitted = [call for call in agent.call_args_list if call.args[0] == 'steer']
-        self.assertEqual([(call.kwargs['payload']['model'], call.kwargs['payload']['reasoning_effort'])
-                          for call in submitted], [('test', 'high'), ('new-model', 'medium'), ('new-model', None)])
-        self.assertTrue(all(call.args[2:5] == ('w1:p2', '--thread-id', 'thread') for call in submitted))
+        expected = [('test', 'high'), ('new-model', 'medium')]
+        self.assertEqual([(call.args[0].model, call.args[0].reasoning_effort) for call in preflight.call_args_list],
+                         expected)
+        self.assertEqual([(call.args[1].model, call.args[1].reasoning_effort) for call in provision.call_args_list],
+                         expected)
+        followup = next(call for call in agent.call_args_list if call.args[0] == 'steer')
+        self.assertEqual(followup.kwargs['payload'], {'prompt': 'Continue existing work', 'account': 'account'})
 
     def test_invalid_config_reports_setting_and_prevents_turn(self):
         worker = self.config['workers'][0]
@@ -188,17 +176,12 @@ class Contract(unittest.TestCase):
 
         worker['reasoning_effort'] = 'unknown'
         self.save()
-        self.native.rows.append(self.native.worker)
-        self.native.worker['status'] = 'I:UNREAD'
-        self.native.result['turn_model_options'] = True
-        with (patch.object(self.native, 'preflight', return_value=dict(
-                  turn_model_options=True, reasoning_efforts=['high'])),
-              patch.object(self.native, 'agent', wraps=self.native.agent) as agent):
-            with self.assertRaisesRegex(Hold, "reasoning_effort 'unknown' is unsupported by model 'test'") as error:
-                self.engine.execute('steer', pane_id='w1:p2', prompt='Invalid config')
+        message = "reasoning_effort 'unknown' is unsupported by model 'test'"
+        with patch.object(self.native, 'preflight', side_effect=Hold('invalid_config', message)):
+            with self.assertRaisesRegex(Hold, message) as error:
+                self.managed_run()
         self.assertEqual(error.exception.code, 'invalid_config')
-        self.assertTrue(all(call.args[0] == 'status' for call in agent.call_args_list))
-        self.assertEqual(self.native.worker['status'], 'I:UNREAD')
+        self.assertEqual(self.native.rows, [self.native.manager])
 
         for content, message in (('skills: [', 'Invalid YAML'), ('skills: false', 'skills must be a mapping')):
             with self.subTest(content=content):
@@ -207,18 +190,28 @@ class Contract(unittest.TestCase):
                 self.assertEqual(result['error']['code'], 'invalid_config')
                 self.assertIn(message, result['error']['message'])
 
-    def test_configured_effort_requires_explicit_dependency_support(self):
+    def test_native_checks_and_passes_effort_to_worker_launch(self):
         self.config['workers'][0]['reasoning_effort'] = 'high'
+        self.config['workers'][0]['launch_profile'] = 'profile'
         self.save()
-        with self.assertRaises(Hold) as error:
-            self.engine.execute('run', name='worker', parameters={'TASK': 'fixture'})
-        self.assertEqual(error.exception.code, 'turn_model_options_unavailable')
-        self.assertEqual(self.native.rows, [self.native.manager])
+        worker = Settings.read(self.home, raw_settings(self.home)).workers['worker']
+        native = Native(self.home)
+        with patch.object(native, 'agent') as agent:
+            native.preflight(worker, worker.cwd)
+            native.provision('w1', worker, worker.cwd)
+        preflight, provision = agent.call_args_list
+        self.assertEqual((preflight.args[0], provision.args[0]), ('preflight', 'provision'))
+        for call in (preflight, provision):
+            self.assertEqual(call.args[-3:], ('--launch-profile', 'profile', '--reasoning-effort=high'))
 
-        self.native.rows.append(self.native.worker)
-        with self.assertRaises(Hold) as error:
-            self.engine.execute('steer', pane_id='w1:p2', prompt='Follow-up')
-        self.assertEqual(error.exception.code, 'turn_model_options_unavailable')
+    def test_legacy_agent_manager_reports_missing_launch_effort_support(self):
+        native = Native(self.home)
+        argv = ['preflight', '--reasoning-effort=high']
+        legacy = CompletedProcess(argv, 2, '', 'agent_manager.py: error: unrecognized arguments: --reasoning-effort=high\n')
+        with patch('project_manager_engine.hermes_native.subprocess.run', return_value=legacy):
+            with self.assertRaises(Hold) as error:
+                native.invoke(argv)
+        self.assertEqual(error.exception.code, 'launch_reasoning_effort_unavailable')
 
     def managed_root(self):
         root = self.home / 'managed'
