@@ -39,11 +39,19 @@ Use `/project-manager` or Hermes cron history to verify the watchdog. A successf
 
 ## Settings
 
-- Each worker has a unique `name`, a unique `pane_tag`, an `agent` supported by the interactive agent-manager API, a `model`, an existing absolute `working_directory`, a `description`, and a `prompt_file`. The first supported worker backend is Codex. Use lowercase letters, digits and hyphens in worker names. The working directory is the default for `run`. A workflow can supply a separate directory for each pane it retains.
+- Each worker has a unique `name`, a unique `pane_tag`, an `agent` supported by the interactive agent-manager API, a `model`, a `description`, and a `prompt_file`. The first supported worker backend is Codex. Use lowercase letters, digits and hyphens in worker names. Give each worker either an existing absolute `working_directory` or a [managed work root](#managed-worker-directories).
 - `pane_tag` is a string of one to four ASCII letters or digits, such as `I`. Quote a tag that contains only digits. The engine prefixes the worker's pane status with this tag.
 - `manager` has the same fields except `agent` and `pane_tag`. The manager always runs Hermes in the TUI and uses the configured `model` in its gateway session. If the manager name is omitted, setup uses the local hostname.
 - `launch_profile` is an optional execution profile name. For Codex workers it selects a native Codex profile for both the app server and the TUI. Select a profile with the access your workflow requires. A manager execution profile requires Hermes to support per-session application and verification. The backend refuses a requested launch profile it cannot apply.
 - `max_working_panes` is a positive integer. It counts workers that are starting, running, blocked or suspended mid-turn, possibly still running, or whose pane is locked or has an unverified lock. The manager pane, quota receiver and verified unlocked finished workers are outside that count.
+
+## Managed worker directories
+
+Set `managed_work_root: /absolute/path/to/worker-runs` in a worker record in place of `working_directory`. Create the root beforehand with mode `0700`, owned by the user running the manager. Use a dedicated path with no symlink components. Workers can share a root or use separate roots. Each `run` without an explicit working directory gets a fresh, empty subdirectory named for the worker and recorded privately in the profile. A configured `working_directory` or an explicit `run --cwd` remains caller-managed, including paths inside a managed root.
+
+The manager retains every allocation, including empty directories after a pane closes. A managed `close` reports `directory_cleanup.status: retained` with reason `cleanup_guard_unavailable` when the directory can be identified. `capacity` lists the recorded paths under `managed_work`.
+
+Automatic cleanup requires a receiver operation in `hermes-herdr-agent-manager` that verifies the exact workspace, pane, terminal, thread and completed turn, and excludes both operator and automated admissions through confirmed closure. It also requires a filesystem operation that keeps the original root and allocation identity verified through removal of the empty directory. A runtime liveness guarantee must cover every thread's working directory, root and open descriptors, and exclude new access through removal. A process leader's `/proc` entry can miss a thread with separate filesystem state, and even a complete snapshot can go stale. Ordinary pane-close receipts and legacy close records remain informational.
 
 ## Prompt files
 

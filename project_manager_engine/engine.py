@@ -6,9 +6,9 @@ import os
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from tempfile import NamedTemporaryFile
 
-from .settings import Hold, Settings, directory, raw_settings
+from .managed_work import BINDING, ManagedWork, open_root, write_record
+from .settings import Hold, Settings, directory, identifier, raw_settings
 
 
 WORKER_OPERATIONS = ('run', 'steer', 'query', 'mark_read', 'set_comment', 'close',
@@ -39,10 +39,6 @@ def profile_lock(home):
     with os.fdopen(os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600), 'rb') as stream:
         fcntl.flock(stream, fcntl.LOCK_EX)
         yield
-
-
-def identifier(value):
-    return isinstance(value, str) and bool(value.strip())
 
 
 def validate_worker_prompt(prompt):
@@ -112,6 +108,7 @@ class Engine:
             self.native.configure(self.settings)
             self.workspace_id = None
             self.launches = self.read_launches()
+            self.work = ManagedWork(private_runtime(self.home))
             return getattr(self, command)(**kwargs)
 
     def read_launches(self):
@@ -123,7 +120,8 @@ class Engine:
                 if not isinstance(record, dict) or not all(identifier(record.get(key)) for key in (
                         'instance', 'workspace_id', 'pane_id', 'terminal_id', 'worker', 'thread_id')):
                     raise ValueError
-                if any(key in record and not identifier(record[key]) for key in ('turn_id', 'parameters_fingerprint')):
+                if any(key in record and not identifier(record[key]) for key in
+                       ('turn_id', 'parameters_fingerprint', 'work_key', 'working_directory')):
                     raise ValueError
             except (OSError, ValueError) as exc:
                 raise Hold('invalid_launch_record', 'A pending worker admission record could not be verified') from exc
@@ -131,23 +129,7 @@ class Engine:
         return launches
 
     def remember_launch(self, path, record):
-        temporary = NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent, delete=False)
-        try:
-            with temporary as stream:
-                json.dump(record, stream)
-                stream.flush()
-                os.fsync(stream.fileno())
-            if path in self.launches:
-                os.replace(temporary.name, path)
-            else:
-                os.link(temporary.name, path)
-        finally:
-            Path(temporary.name).unlink(missing_ok=True)
-        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        write_record(path, record, replace=path in self.launches)
         self.launches[path] = record
 
     def forget_launch(self, path):
@@ -253,7 +235,10 @@ class Engine:
         if path is not None:
             launch = self.launches[path]
             turn = launch.get('turn_id')
-            if any(row.get(key) != launch[key] for key in ('terminal_id', 'worker', 'thread_id')):
+            binding_fields = ('terminal_id', 'worker', 'thread_id')
+            if 'working_directory' in launch:
+                binding_fields += ('working_directory',)
+            if any(row.get(key) != launch[key] for key in binding_fields):
                 row['recoverable'] = False
                 reason = Hold('binding_unverified', 'The recorded submission binding cannot be verified')
                 row['reason'] = reason.as_dict()
@@ -367,6 +352,18 @@ class Engine:
         return [row for raw in layout if raw.get('status') not in ('MGR', 'QUOTA')
                 and (row := self.row(raw)) and row['role'] == 'worker']
 
+    def check_work_cwd(self, cwd):
+        if any(Path(cwd).is_relative_to(self.work.path(key)) for key in self.work.records):
+            raise Hold('directory_in_use', 'Only the original assignment may use a recorded managed directory')
+
+    def preflight_root(self, setting):
+        self.check_work_cwd(setting.work_root)
+        try:
+            with open_root(setting.work_root):
+                self.native.preflight(setting, setting.work_root)
+        except OSError as exc:
+            raise Hold('invalid_work_root', 'Managed work root must be an existing directory without symlinks') from exc
+
     def capacity(self):
         layout = self.layout()
         rows = self.worker_rows(layout)
@@ -379,7 +376,11 @@ class Engine:
             if not reason:
                 try:
                     self.check_directory(setting.cwd, rows)
-                    self.native.preflight(setting, setting.cwd)
+                    if setting.work_root:
+                        self.preflight_root(setting)
+                    else:
+                        self.check_work_cwd(setting.cwd)
+                        self.native.preflight(setting, setting.cwd)
                 except Hold as exc:
                     reason = exc.code
             ready[setting.name] = dict(ready=reason is None, hold=reason)
@@ -396,7 +397,13 @@ class Engine:
                 unresolved.append(dict(
                     {key: record[key] for key in ('instance', 'workspace_id', 'pane_id', 'terminal_id', 'worker', 'thread_id')},
                     admission='unknown', presence=presence))
-        return dict(slots, occupied=list(slots['occupied_states']), workers=ready, unresolved_launches=unresolved)
+        result = dict(slots, occupied=list(slots['occupied_states']), workers=ready, unresolved_launches=unresolved)
+        if self.work.records:
+            result['managed_work'] = [
+                dict(path=str(self.work.path(key)), worker=record['worker'], workspace_id=record['workspace_id'],
+                     pane_id=(record.get('binding') or {}).get('pane_id'), turn_id=record.get('turn_id'))
+                for key, record in sorted(self.work.records.items())]
+        return result
 
     def worker_pane(self, pane_id):
         for raw in self.layout():
@@ -436,7 +443,7 @@ class Engine:
 
     @staticmethod
     def check_directory(cwd, rows):
-        if any(row.get('working_directory') == cwd for row in rows):
+        if cwd is not None and any(row.get('working_directory') == cwd for row in rows):
             raise Hold('directory_in_use', 'An open worker pane owns this directory')
         if any((row['state'] in ('unknown', 'starting') or row.get('admission') in ('not_attempted', 'unknown'))
                and not row.get('working_directory') for row in rows):
@@ -460,11 +467,19 @@ class Engine:
                            admission='accepted')
             raise Hold('outcome_unknown', 'This initial prompt already has an unverified submission',
                        pane_id=record['pane_id'], workspace_id=record['workspace_id'], admission='unknown')
-        self.native.preflight(setting, cwd)
+        if cwd is None:
+            self.preflight_root(setting)
+        else:
+            self.check_work_cwd(cwd)
+            self.native.preflight(setting, cwd)
         self.workspace(create=True)
         rows = self.panes(role='worker')['panes']
         account = self.check_admission(setting, rows=rows)
         self.check_directory(cwd, rows)
+        work_key = None
+        if cwd is None:
+            work_key = self.work.allocate(setting, self.settings.instance, self.workspace_id)
+            cwd = str(self.work.path(work_key))
         pane = None
         try:
             provision = self.native.provision(self.workspace_id, setting, cwd)
@@ -487,9 +502,13 @@ class Engine:
             code = 'partial_provision' if exc.code in ('transport_error', 'outcome_unknown', 'invalid_response') else exc.code
             raise Hold(code, str(exc), **details) from exc
         try:
-            self.remember_launch(pending, dict(instance=self.settings.instance, workspace_id=self.workspace_id,
-                                              pane_id=pane, terminal_id=row['terminal_id'], worker=name, thread_id=thread,
-                                              parameters_fingerprint=fingerprint(values)))
+            launch = dict(instance=self.settings.instance, workspace_id=self.workspace_id,
+                          pane_id=pane, terminal_id=row['terminal_id'], worker=name, thread_id=thread,
+                          parameters_fingerprint=fingerprint(values))
+            if work_key:
+                self.work.update(work_key, binding={key: launch[key] for key in BINDING})
+                launch.update(work_key=work_key, working_directory=cwd)
+            self.remember_launch(pending, launch)
         except OSError as exc:
             raise Hold('launch_record_unavailable', 'Could not record the initial prompt before sending it',
                        pane_id=pane, admission='not_attempted', phase='submission') from exc
@@ -510,11 +529,17 @@ class Engine:
         except (Hold, OSError):
             # The verified receipt is valid even if the label update must wait.
             pass
+        if work_key:
+            receipt['working_directory'] = cwd
         return dict(receipt, admission='accepted')
 
     def record_launch_turn(self, path, turn):
         record = self.launches[path]
         if 'turn_id' not in record:
+            key = record.get('work_key')
+            work = self.work.records.get(key)
+            if work and self.work_matches(key, record):
+                self.work.update(key, turn_id=turn)
             self.remember_launch(path, dict(record, turn_id=turn))
 
     def finish_launch(self, path, row):
@@ -534,9 +559,14 @@ class Engine:
         if launch := self.pane_launch(pane_id):
             self.finish_launch(launch, row)
         self.rename(pane_id, 'status', f'{worker.tag}:RUN')
+        key = self.work_for_pane(pane_id, row=row)
+        if key:
+            # Keep an ambiguous follow-up from looking like the previous turn.
+            self.work.update(key, turn_id=None)
         try:
-            return issued(self.agent('steer', pane_id, '--thread-id', row['thread_id'], '--return-admission',
-                                     '--request-stdin', payload={'prompt': prompt, 'account': account}), pane_id)
+            reply = self.agent('steer', pane_id, '--thread-id', row['thread_id'], '--return-admission',
+                               '--request-stdin', payload={'prompt': prompt, 'account': account})
+            receipt = issued(reply, pane_id, row['thread_id'] if key else None)
         except Hold as exc:
             if exc.code not in ('outcome_unknown', 'transport_error', 'invalid_response',
                                 'codex_disconnected', 'hermes_disconnected'):
@@ -544,6 +574,13 @@ class Engine:
                 if (current.get('turn_id'), current.get('thread_id')) == (row.get('turn_id'), row['thread_id']):
                     self.rename(pane_id, 'status', row['status'])
             raise
+        if key:
+            try:
+                self.work.update(key, turn_id=receipt['turn_id'])
+            except OSError:
+                # A successful admission remains valid even if the journal update fails.
+                pass
+        return receipt
 
     def query(self, pane_id, turn_id=None):
         row = self.worker_pane(pane_id)
@@ -586,12 +623,29 @@ class Engine:
         self.tracked(pane_id)
         return self.rename(pane_id, 'comment', comment)
 
+    def work_for_pane(self, pane_id, *, row=None):
+        matches = [key for key, record in self.work.records.items()
+                   if (record['instance'], record['workspace_id']) == (self.settings.instance, self.workspace_id)
+                   and (record.get('binding') or {}).get('pane_id') == pane_id
+                   and (row is None or self.work_matches(key, row))]
+        return matches[0] if len(matches) == 1 else None
+
+    def work_matches(self, key, row):
+        record = self.work.records[key]
+        return ((record['instance'], record['workspace_id'], record['worker']) ==
+                (self.settings.instance, self.workspace_id, row.get('worker'))
+                and record.get('binding') == {field: row.get(field) for field in BINDING}
+                and row.get('working_directory') == str(self.work.path(key)))
+
     def close(self, pane_id):
         try:
             row = self.worker_pane(pane_id)
         except Hold as exc:
             if exc.code == 'pane_not_found' and self.workspace_id is not None:
-                return dict(pane_id=pane_id, closed=True)
+                receipt = dict(pane_id=pane_id, closed=True)
+                if key := self.work_for_pane(pane_id):
+                    receipt['directory_cleanup'] = self.work.retention(key)
+                return receipt
             raise
         if row.get('admission') == 'unknown':
             raise Hold('outcome_unknown', 'Resolve the worker submission before closing the pane',
@@ -605,7 +659,10 @@ class Engine:
         launch = self.pane_launch(pane_id)
         if launch is not None and row['lock'] == 'unlocked':
             self.finish_launch(launch, row)
-        return self.native.pane('close', '--pane', pane_id, '--defer-locked', workspace=self.workspace_id)
+        receipt = self.native.pane('close', '--pane', pane_id, '--defer-locked', workspace=self.workspace_id)
+        if key := self.work_for_pane(pane_id, row=row):
+            receipt['directory_cleanup'] = self.work.retention(key)
+        return receipt
 
     @staticmethod
     def defer_unused_close(pane_id):

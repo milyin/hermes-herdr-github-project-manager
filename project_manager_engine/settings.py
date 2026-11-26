@@ -26,6 +26,10 @@ class Hold(RuntimeError):
         return dict(code=self.code, message=str(self), **self.details)
 
 
+def identifier(value):
+    return isinstance(value, str) and bool(value.strip())
+
+
 if yaml:
     class ProfileLoader(yaml.SafeLoader):
         def construct_mapping(self, node, deep=False):
@@ -86,6 +90,14 @@ def directory(value):
     return str(Path(value).resolve())
 
 
+def is_work_root(value):
+    if not isinstance(value, str) or '\0' in value:
+        return False
+    path = Path(value)
+    return (path.is_absolute() and path.anchor == '/' and bool(path.name)
+            and '..' not in path.parts and str(path) == value)
+
+
 @dataclass(frozen=True)
 class Prompt:
     path: Path
@@ -131,11 +143,12 @@ class Agent:
     name: str
     backend: str
     model: str
-    cwd: str
+    cwd: str | None
     description: str
     prompt: Prompt
     tag: str | None = None
     launch_profile: str | None = None
+    work_root: str | None = None
 
     @classmethod
     def read(cls, home, record, where, *, manager=False):
@@ -147,11 +160,18 @@ class Agent:
         tag = None if manager else text_field(record, 'pane_tag', where)
         require(manager or WORKER_TAG.fullmatch(tag), f'{where}.pane_tag must use one to four ASCII letters or digits')
         launch = text_field(record, 'launch_profile', where) if 'launch_profile' in record else None
+        work_root = None
+        cwd = None
+        if 'managed_work_root' in record:
+            work_root = record['managed_work_root']
+            require(not manager and 'working_directory' not in record and is_work_root(work_root),
+                    f'{where}.managed_work_root must be an absolute worker root in place of working_directory')
+        else:
+            cwd = directory(text_field(record, 'working_directory', where))
         prompt = Prompt.read(home, f'{where} ({name})', text_field(record, 'prompt_file', where),
                              record.get('parameters', {}), manager=manager)
-        return cls(name, backend, text_field(record, 'model', where),
-                   directory(text_field(record, 'working_directory', where)),
-                   text_field(record, 'description', where), prompt, tag, launch)
+        return cls(name, backend, text_field(record, 'model', where), cwd,
+                   text_field(record, 'description', where), prompt, tag, launch, work_root)
 
 
 @dataclass(frozen=True)
