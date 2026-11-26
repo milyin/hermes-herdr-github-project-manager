@@ -15,7 +15,8 @@ WORKER_OPERATIONS = ('run', 'steer', 'query', 'mark_read', 'set_comment', 'close
                      'workers', 'panes', 'capacity', 'quota')
 COMMANDS = (*WORKER_OPERATIONS, 'prepare_panes', 'tick')
 OCCUPIED = {'starting', 'working', 'blocked', 'suspended', 'unknown'}
-EXCERPT_LIMIT = 12000
+# Match the agent manager's text input limit before touching the workspace.
+MAX_WORKER_PROMPT_BYTES = 32 * 1024
 # The receiver reports deadline_elapsed before any prompt bytes are written.
 # Partial writes, reply deadlines and failures after admission use other codes.
 RUN_REFUSALS = {'user_locked', 'lock_unknown', 'worker_unavailable', 'turn_active', 'already_started',
@@ -42,6 +43,19 @@ def profile_lock(home):
 
 def identifier(value):
     return isinstance(value, str) and bool(value.strip())
+
+
+def validate_worker_prompt(prompt):
+    refusal = dict(phase='validation', admission='not_attempted')
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise Hold('invalid_prompt', 'Worker prompt must be nonempty text', **refusal)
+    try:
+        size = len(prompt.encode('utf-8'))
+    except UnicodeEncodeError as exc:
+        raise Hold('invalid_prompt', 'Worker prompt must be valid UTF-8', **refusal) from exc
+    if size > MAX_WORKER_PROMPT_BYTES:
+        raise Hold('invalid_prompt', f'Worker prompt exceeds {MAX_WORKER_PROMPT_BYTES} UTF-8 bytes',
+                   prompt_bytes=size, max_prompt_bytes=MAX_WORKER_PROMPT_BYTES, **refusal)
 
 
 def fingerprint(value):
@@ -432,9 +446,10 @@ class Engine:
         setting = self.worker(name)
         text, values = setting.prompt.render(parameters)
         if not isinstance(prompt, str):
-            raise Hold('invalid_prompt', 'Prompt must be text')
-        cwd = setting.cwd if working_directory is None else directory(working_directory)
+            raise Hold('invalid_prompt', 'Prompt must be text', phase='validation', admission='not_attempted')
         body = dict(prompt=text + ('\n\n' + prompt if prompt else ''), parameters=values)
+        validate_worker_prompt(body['prompt'])
+        cwd = setting.cwd if working_directory is None else directory(working_directory)
         dispatch = fingerprint([name, body['prompt']])
         pending = private_runtime(self.home) / f'launch-{dispatch}.json'
         if pending in self.launches:
@@ -509,12 +524,11 @@ class Engine:
         self.forget_launch(path)
 
     def steer(self, pane_id, prompt):
+        validate_worker_prompt(prompt)
         row = self.tracked(pane_id)
         if (row['lock'] != 'unlocked' or row['state'] not in ('idle', 'done')
                 or row['pending_closure']):
             raise Hold('not_idle', 'The bound worker pane is unavailable for a follow-up', pane_id=pane_id)
-        if not isinstance(prompt, str) or not prompt.strip():
-            raise Hold('invalid_prompt', 'Follow-up must contain text')
         worker = self.worker(row['worker'])
         account = self.check_admission(worker)
         if launch := self.pane_launch(pane_id):
@@ -718,10 +732,7 @@ class Engine:
                 result = self.query(report['pane_id'], report['turn_id'])
                 if result['state'] != 'done':
                     return {'action': 'report_held'}
-                message = result['message']
-                event.update(type='worker_result', message=message[:EXCERPT_LIMIT])
-                if len(message) > EXCERPT_LIMIT:
-                    event['truncated'] = True
+                event.update(type='worker_result', message=result['message'])
         refreshed = self.panes()['panes']
         managers = [row for row in refreshed if row['role'] == 'manager' and row['pane_id'] == manager['pane_id']]
         if len(managers) != 1 or not self.manager_idle(managers[0]):
@@ -734,8 +745,10 @@ class Engine:
                 return {'action': 'report_held'}
         manager_prompt, _ = self.settings.manager.prompt.render()
         workers = {worker.name: worker.description for worker in self.settings.workers.values()}
+        # Keep Hermes context references inert while preserving the decoded event.
+        event_data = json.dumps(event, ensure_ascii=False).replace('@', r'\u0040')
         payload = (manager_prompt + '\n\nConfigured workers: ' + json.dumps(workers, ensure_ascii=False)
-                   + '\n\nWatchdog event (data):\n' + json.dumps(event, ensure_ascii=False))
+                   + '\n\nWatchdog event (data):\n' + event_data)
         if report:
             slots = self.worker_slots(row for row in refreshed if row['role'] == 'worker')
         else:
