@@ -1,4 +1,4 @@
-"""Run the rendered GitHub workflow merge command with isolated API fixtures."""
+"""Check the rendered GitHub workflow with isolated fixtures."""
 
 from contextlib import redirect_stdout
 from copy import deepcopy
@@ -78,6 +78,87 @@ class GitHubWorkflowPrompt(unittest.TestCase):
         self.merge_response = dict(merged=True, sha=MERGE_SHA)
         self.calls = []
         self.review_reads = 0
+
+    def admission_policy(self, prompt, *observations):
+        section = prompt.split('## Worker queues and admission\n', 1)[1].split('## Merging conditions\n', 1)[0]
+        rows = [line.strip('| ').split(' | ') for line in section.splitlines() if line.startswith('| ')]
+        columns, _, *rules = rows
+        for rule in rules:
+            decision = dict(zip(columns, rule, strict=True))
+            if decision['Observation'] in observations:
+                return decision
+        self.fail(f'No rendered admission rule matched {observations!r}')
+
+    def assert_capacity_queues(self, prompt):
+        decision = self.admission_policy(prompt, 'Capacity wait')
+        self.assertEqual(decision['Implementation placement'], 'In progress → Queue')
+        self.assertEqual(decision['Review placement'], 'In review → Queue')
+        self.assertEqual(decision['Feedback'], 'Keep pending')
+        self.assertEqual(decision['Next action'], 'Wait for capacity')
+
+    def test_configured_reviewer_routes_all_review_admissions(self):
+        prompt = self.workflows.manager.prompt.render({'REVIEWER': 'review-prod'})[0]
+        self.assertIn('Route new PR reviews, queued reviews, and reviews of changed heads to `review-prod`.', prompt)
+        self.assertIn('Pass that exact name to `run`, or `steer` an eligible pane only after verifying '
+                      'that it belongs to that worker and issue.', prompt)
+
+    def test_full_capacity_then_verified_admission(self):
+        prompt = self.workflows.manager.prompt.render()[0]
+        self.assertIn("Use the first matching row to decide the issue entry's placement, feedback update, and next action.",
+                      prompt)
+        self.assertIn('zero available slots or a `capacity` refusal from `run` or `steer`', prompt)
+        self.assert_capacity_queues(prompt)
+
+        available = self.admission_policy(prompt, 'Ready to dispatch')
+        self.assertEqual(available['Implementation placement'], 'Keep current placement')
+        self.assertEqual(available['Review placement'], 'Keep current placement')
+        self.assertEqual(available['Feedback'], 'Keep pending')
+        self.assertEqual(available['Next action'], 'Record intent and dispatch once')
+
+        admitted = self.admission_policy(prompt, 'Verified admission')
+        self.assertEqual(admitted['Implementation placement'], 'In progress')
+        self.assertEqual(admitted['Review placement'], 'In review')
+        self.assertEqual(admitted['Feedback'], 'Assign only the admitted batch')
+        self.assertEqual(admitted['Next action'], 'Follow the admitted turn')
+        self.assertIn('Move that entry between headings and subsections in a single dashboard update', prompt)
+        self.assertIn('After each outcome, update the same entry using the table.', prompt)
+
+    def test_capacity_regression_rejects_need_attention_mutation(self):
+        prompt = self.workflows.manager.prompt.render()[0]
+        for queue in ('In progress → Queue', 'In review → Queue'):
+            with self.subTest(queue=queue):
+                mutated = re.sub(r'^\| Capacity wait \|[^\n]+',
+                                 lambda row: row[0].replace(queue, 'Need attention'), prompt, flags=re.MULTILINE)
+                self.assertNotEqual(mutated, prompt)
+                with self.assertRaisesRegex(AssertionError, 'Need attention'):
+                    self.assert_capacity_queues(mutated)
+
+    def test_uncertain_receipts_keep_pending_feedback_and_prevent_redispatch(self):
+        prompt = self.workflows.manager.prompt.render()[0]
+        self.assertIn('a missing or mismatched receipt, `outcome_unknown`, or `admission: unknown`', prompt)
+        self.assertIn('A free slot, a missing pane, or the previous turn in the target pane leaves the dispatch unresolved.',
+                      prompt)
+        for observation in ('Capacity wait', 'Ready to dispatch'):
+            with self.subTest(observation=observation):
+                held = self.admission_policy(prompt, observation, 'Unresolved dispatch')
+                self.assertEqual(held['Implementation placement'], 'Need attention')
+                self.assertEqual(held['Review placement'], 'Need attention')
+                self.assertEqual(held['Feedback'], 'Keep pending')
+                self.assertEqual(held['Next action'], 'Reconcile without dispatching')
+
+        recovered = self.admission_policy(prompt, 'Verified admission', 'Ready to dispatch')
+        self.assertEqual(recovered['Feedback'], 'Assign only the admitted batch')
+        self.assertEqual(recovered['Next action'], 'Follow the admitted turn')
+        self.assertIn('Retry only after verifying that submission was never attempted', prompt)
+
+    def test_operator_and_merge_blockers_take_precedence_over_capacity(self):
+        prompt = self.workflows.manager.prompt.render()[0]
+        self.assertIn('PRs queued or scheduled for merge in GitHub', prompt)
+        self.assertIn('List **Need attention** first, followed by **In progress**, **In review**, and **Done**.', prompt)
+        decision = self.admission_policy(prompt, 'Capacity wait', 'Genuine blocker')
+        self.assertEqual(decision['Implementation placement'], 'Need attention')
+        self.assertEqual(decision['Review placement'], 'Need attention')
+        self.assertEqual(decision['Next action'], 'Wait for resolution')
 
     def request(self, method, path, token, data=None):
         self.calls.append((method, path, data))
