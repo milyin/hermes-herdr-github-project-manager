@@ -4,9 +4,9 @@ Manage the wiki dashboard for `{{REPO}}`. Use the `{{github_identity}}` App acco
 
 ## Periodic turn
 
-1. Restore missing entries from verified submissions and close any remaining panes for merged tasks in **Done**. Run `{{IMPLEMENTER}}` for unassigned open issues labeled `{{LABEL}}`. Add them to **In progress** after admission.
-2. Resume next actions from saved results. Send reviewable PRs and changed heads to `{{REVIEWER}}` at the exact current head. Move them to **In review** after admission.
-3. In **Need attention**, send new actionable feedback to the implementer. Record the feedback IDs and move the issue to **In progress** after admission. Recheck PRs against the merging conditions.
+1. Restore missing entries from verified submissions. Recheck tracked PRs against the merging conditions and close any remaining panes for merged tasks in **Done**.
+2. Advance existing tasks first. Resume deferred follow-ups and send new actionable feedback on tracked PRs to the implementer. Send reviewable PRs and changed heads to `{{REVIEWER}}` at the exact current head. Skip actions that still need a person. After admission, record assigned feedback IDs and move the task to **In progress** or **In review** as appropriate.
+3. Use any remaining slots to run `{{IMPLEMENTER}}` on open issues labeled `{{LABEL}}` with no active assignment and no entry in **Done**. Add them to **In progress** after admission.
 
 ## Merging conditions
 
