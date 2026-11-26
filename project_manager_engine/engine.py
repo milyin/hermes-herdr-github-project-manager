@@ -16,6 +16,8 @@ WORKER_OPERATIONS = ('run', 'steer', 'query', 'mark_read', 'set_comment', 'close
 COMMANDS = (*WORKER_OPERATIONS, 'prepare_panes', 'tick')
 OCCUPIED = {'starting', 'working', 'blocked', 'suspended', 'unknown'}
 EXCERPT_LIMIT = 12000
+PANE_BINDING = ('instance', 'workspace_id', 'pane_id', 'terminal_id', 'worker', 'thread_id')
+CLOSE_UNCERTAIN = {'outcome_unknown', 'transport_error', 'invalid_response', 'local_error', 'pane_not_found'}
 # The receiver reports deadline_elapsed before any prompt bytes are written.
 # Partial writes, reply deadlines and failures after admission use other codes.
 RUN_REFUSALS = {'user_locked', 'lock_unknown', 'worker_unavailable', 'turn_active', 'already_started',
@@ -97,33 +99,36 @@ class Engine:
             self.settings = Settings.read(self.home, raw)
             self.native.configure(self.settings)
             self.workspace_id = None
-            self.launches = self.read_launches()
+            self.launches = self.read_bindings('launch')
+            self.closures = self.read_bindings('close')
             return getattr(self, command)(**kwargs)
 
-    def read_launches(self):
-        launches = {}
-        for path in private_runtime(self.home).glob('launch-*.json'):
+    def read_bindings(self, kind):
+        records = {}
+        for path in private_runtime(self.home).glob(f'{kind}-*.json'):
             try:
                 with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), encoding='utf-8') as stream:
                     record = json.load(stream)
-                if not isinstance(record, dict) or not all(identifier(record.get(key)) for key in (
-                        'instance', 'workspace_id', 'pane_id', 'terminal_id', 'worker', 'thread_id')):
+                if not isinstance(record, dict) or not all(identifier(record.get(key)) for key in PANE_BINDING):
                     raise ValueError
                 if any(key in record and not identifier(record[key]) for key in ('turn_id', 'parameters_fingerprint')):
                     raise ValueError
             except (OSError, ValueError) as exc:
-                raise Hold('invalid_launch_record', 'A pending worker admission record could not be verified') from exc
-            launches[path] = record
-        return launches
+                if kind == 'launch':
+                    raise Hold('invalid_launch_record', 'A pending worker admission record could not be verified') from exc
+                raise Hold('invalid_close_record', 'A pending worker close record could not be verified') from exc
+            records[path] = record
+        return records
 
-    def remember_launch(self, path, record):
+    @staticmethod
+    def save_binding(path, record, *, replace=False):
         temporary = NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent, delete=False)
         try:
             with temporary as stream:
                 json.dump(record, stream)
                 stream.flush()
                 os.fsync(stream.fileno())
-            if path in self.launches:
+            if replace:
                 os.replace(temporary.name, path)
             else:
                 os.link(temporary.name, path)
@@ -134,6 +139,9 @@ class Engine:
             os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
+
+    def remember_launch(self, path, record):
+        self.save_binding(path, record, replace=path in self.launches)
         self.launches[path] = record
 
     def forget_launch(self, path):
@@ -144,6 +152,14 @@ class Engine:
         return next((path for path, record in self.launches.items() if (
             record['instance'], record['workspace_id'], record['pane_id']) == (
                 self.settings.instance, self.workspace_id, pane_id)), None)
+
+    def close_path(self, pane_id):
+        scope = fingerprint([self.settings.instance, self.workspace_id, pane_id])
+        return self.home / 'project-manager' / f'close-{scope}.json'
+
+    def forget_close(self, path):
+        path.unlink()
+        del self.closures[path]
 
     def workspace(self, *, create=False):
         if self.workspace_id is not None:
@@ -176,7 +192,27 @@ class Engine:
         layout = self.native.pane('layout', workspace=workspace)
         if layout.get('workspace_id') != workspace:
             raise Hold('workspace_changed', 'Herdr returned a different workspace')
-        return [dict(pane, tab_zoomed=tab['zoomed']) for tab in layout['tabs'] for pane in tab['panes']]
+        try:
+            tabs = layout['tabs']
+            if not isinstance(tabs, list) or any(
+                    not isinstance(tab['panes'], list) or type(tab['zoomed']) is not bool for tab in tabs):
+                raise ValueError
+            panes = [dict(pane, tab_zoomed=tab['zoomed']) for tab in tabs for pane in tab['panes']]
+            visible = {pane['pane_id'] for pane in panes}
+            if len(visible) != len(panes) or not all(map(identifier, visible)):
+                raise ValueError
+        except (KeyError, TypeError, ValueError) as exc:
+            raise Hold('invalid_response', 'Herdr did not return a verified pane layout') from exc
+        for path, record in list(self.closures.items()):
+            if ((record['instance'], record['workspace_id']) != (self.settings.instance, workspace)
+                    or record['pane_id'] in visible):
+                continue
+            launch = self.pane_launch(record['pane_id'])
+            if (launch is not None and 'turn_id' in self.launches[launch]
+                    and all(self.launches[launch][key] == record[key] for key in PANE_BINDING)):
+                self.forget_launch(launch)
+            self.forget_close(path)
+        return panes
 
     def row(self, raw, *, inspect=True):
         pane_id = raw['pane_id']
@@ -229,6 +265,9 @@ class Engine:
             answer.update(state='unknown', reason=exc.as_dict())
         if role == 'worker':
             self.observe_launch(answer, mark)
+            closure = self.closures.get(self.close_path(pane_id))
+            if closure is not None and closure['terminal_id'] == answer['terminal_id']:
+                answer['pending_closure'] = True
         if lock == 'locked' or (role == 'worker' and lock == 'unknown'):
             answer.setdefault('native_state', answer['state'])
             answer['state'] = 'working' if lock == 'locked' else 'unknown'
@@ -394,7 +433,8 @@ class Engine:
                            pane_id=pane_id, presence='no', admission='accepted', turn_id=turn)
             raise Hold('outcome_unknown', 'The worker pane is absent and its submission is still unverified',
                        pane_id=pane_id, presence='no', admission='unknown')
-        raise Hold('pane_not_found', 'The pane is absent from the bound workspace', pane_id=pane_id)
+        raise Hold('pane_not_found', 'The pane is absent from the bound workspace', pane_id=pane_id,
+                   presence='no' if self.workspace_id is not None else 'unknown')
 
     def tracked(self, pane_id):
         row = self.worker_pane(pane_id)
@@ -572,22 +612,56 @@ class Engine:
         try:
             row = self.worker_pane(pane_id)
         except Hold as exc:
-            if exc.code == 'pane_not_found' and self.workspace_id is not None:
+            if exc.code == 'pane_not_found' and exc.details.get('presence') == 'no':
                 return dict(pane_id=pane_id, closed=True)
             raise
+        path = self.close_path(pane_id)
+        previous = self.closures.get(path)
+        if previous is not None and any(row.get(key) != previous[key] for key in ('terminal_id', 'worker', 'thread_id')):
+            raise Hold('binding_unverified', 'The pending close belongs to a different or unverified worker binding',
+                       pane_id=pane_id)
         if row.get('admission') == 'unknown':
             raise Hold('outcome_unknown', 'Resolve the worker submission before closing the pane',
                        pane_id=pane_id, admission='unknown')
         if row.get('admission') == 'not_attempted':
             self.check_unused_pane(row)
             return self.defer_unused_close(pane_id)
-        if (row.get('native_state', row['state']) not in ('idle', 'done')
-                or not identifier(row.get('thread_id'))):
+        if (row.get('native_state', row['state']) not in ('idle', 'done') or row.get('active') is True
+                or not all(identifier(row.get(key)) for key in ('terminal_id', 'thread_id'))):
             raise Hold('not_idle', 'Wait for the worker turn to finish before closing its pane')
-        launch = self.pane_launch(pane_id)
-        if launch is not None and row['lock'] == 'unlocked':
-            self.finish_launch(launch, row)
-        return self.native.pane('close', '--pane', pane_id, '--defer-locked', workspace=self.workspace_id)
+        if row['lock'] == 'unknown':
+            raise Hold('lock_unknown', 'Wait for the worker pane to have a verified lock state', pane_id=pane_id)
+        if previous is None:
+            # Keep the original target if this process stops before it can reconcile the receipt.
+            record = dict(instance=self.settings.instance, workspace_id=self.workspace_id,
+                          **{key: row[key] for key in ('pane_id', 'terminal_id', 'worker', 'thread_id')})
+            self.save_binding(path, record)
+            self.closures[path] = record
+        return self.guarded_close(row, path, new=previous is None)
+
+    def guarded_close(self, row, path, *, new):
+        pane = row['pane_id']
+        try:
+            reply = self.native.pane('close', '--pane', pane, '--defer-locked', workspace=self.workspace_id)
+        except Hold as exc:
+            if exc.code not in CLOSE_UNCERTAIN:
+                if new:
+                    self.forget_close(path)
+                raise
+            reply = {}
+        try:
+            current = next((raw for raw in self.layout() if raw['pane_id'] == pane), None)
+        except Hold as exc:
+            raise Hold('outcome_unknown', 'Could not reconcile the guarded close with the bound workspace',
+                       pane_id=pane, cause=exc.code) from exc
+        if current is None:
+            return dict(pane_id=pane, closed=True)
+        if current.get('terminal_id') != row['terminal_id']:
+            raise Hold('binding_unverified', 'The pane terminal changed while reconciling the guarded close', pane_id=pane)
+        if (reply.get('pane_id') == pane and reply.get('closed') is False
+                and reply.get('status_code') == 'close_deferred' and identifier(reply.get('reason'))):
+            return reply
+        return dict(pane_id=pane, closed=False, status_code='close_deferred', reason='guarded_close_unverified')
 
     @staticmethod
     def defer_unused_close(pane_id):
@@ -662,7 +736,9 @@ class Engine:
                     continue
                 if row['pending_closure']:
                     if row['state'] in ('idle', 'done'):
-                        self.close(pane)
+                        receipt = self.close(pane)
+                        if receipt['closed'] is False:
+                            holds.append(dict(pane_id=pane, error=receipt))
                     continue
                 worker = self.worker(row['worker'])
                 attention = row.get('attention')

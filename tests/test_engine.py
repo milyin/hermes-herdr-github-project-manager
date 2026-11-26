@@ -171,6 +171,143 @@ class Contract(unittest.TestCase):
         self.assertEqual(self.engine.execute('query', pane_id='w1:p2')['delivery'], 'read')
         self.assertEqual(self.engine.execute('capacity')['occupied'], [])
 
+    def read_worker(self):
+        self.native.worker.update(pending_closure=False, displayed_id='w1:p2')
+        self.engine.execute('run', name='worker', parameters={'TASK': 'test'})
+        self.native.result.update(state='done', turn_id='turn')
+        self.engine.execute('mark_read', pane_id='w1:p2', turn_id='turn')
+        self.engine.execute('set_comment', pane_id='w1:p2', comment='#42:#27')
+
+    def test_guarded_close_checks_bound_workspace_absence(self):
+        for lost in (False, True):
+            with self.subTest(lost=lost):
+                if lost:
+                    self.read_worker()
+                else:
+                    self.native.rows.append(self.native.worker)
+                    self.native.worker['status'] = 'I:READ'
+                    self.native.result.update(state='idle', turn_id=None, active=False)
+                pane = self.native.pane
+                operations = []
+
+                def close_with_optional_lost_reply(operation, *args, workspace=None):
+                    operations.append((operation, workspace))
+                    result = pane(operation, *args, workspace=workspace)
+                    if operation == 'close' and lost:
+                        raise Hold('outcome_unknown', 'No verified reply for pane.close_unzoomed')
+                    return result
+
+                with patch.object(self.native, 'pane', side_effect=close_with_optional_lost_reply):
+                    self.assertEqual(self.engine.execute('close', pane_id='w1:p2'),
+                                     dict(pane_id='w1:p2', closed=True))
+                self.assertEqual(operations[-2:], [('close', 'w1'), ('layout', 'w1')])
+                self.assertEqual(self.engine.execute('panes', role='worker')['panes'], [])
+                self.assertEqual(list((self.home / 'project-manager').glob('*.json')), [])
+
+    def test_guarded_close_deferral_preserves_binding_and_retries_after_restart(self):
+        for evidence in ('unavailable', 'lost_reply', 'false_success'):
+            with self.subTest(evidence=evidence):
+                self.read_worker()
+                pane = self.native.pane
+
+                def retained(operation, *args, workspace=None):
+                    if operation != 'close':
+                        return pane(operation, *args, workspace=workspace)
+                    self.assertEqual((args, workspace), (('--pane', 'w1:p2', '--defer-locked'), 'w1'))
+                    if evidence == 'unavailable':
+                        self.native.worker.update(pending_closure=True, displayed_id='w1:p2:DEAD')
+                        return dict(pane_id='w1:p2', closed=False, status_code='close_deferred',
+                                    reason='guarded_close_unavailable')
+                    if evidence == 'lost_reply':
+                        raise Hold('outcome_unknown', 'No verified reply for pane.close_unzoomed')
+                    return dict(pane_id='w1:p2', closed=True)
+
+                with patch.object(self.native, 'pane', side_effect=retained):
+                    expected = 'guarded_close_unavailable' if evidence == 'unavailable' else 'guarded_close_unverified'
+                    receipt = self.engine.execute('close', pane_id='w1:p2')
+                    self.assertEqual((receipt['closed'], receipt['status_code'], receipt['reason']),
+                                     (False, 'close_deferred', expected))
+                    self.engine = Engine(self.home, self.native)
+                    panes = self.engine.execute('panes', role='worker')['panes']
+                    self.assertEqual(len(panes), 1)
+                    row, = panes
+                    self.assertTrue(row['pending_closure'])
+                    self.assertEqual((row['pane_id'], row['terminal_id'], row['worker'], row['thread_id'], row['turn_id'],
+                                      row['status'], row['comment']),
+                                     ('w1:p2', 't2', 'worker', 'thread', 'turn', 'I:READ', '#42:#27'))
+                    self.assertEqual(self.engine.execute('query', pane_id='w1:p2')['delivery'], 'read')
+                    with self.assertRaises(Hold) as error:
+                        self.engine.execute('steer', pane_id='w1:p2', prompt='another turn')
+                    self.assertEqual(error.exception.code, 'not_idle')
+                    retry = self.engine.execute('prepare_panes')
+                    self.assertEqual(retry['holds'], [dict(pane_id='w1:p2', error=receipt)])
+                    self.assertTrue(retry['panes'][1]['pending_closure'])
+                    self.assertEqual(len(list((self.home / 'project-manager').glob('launch-*.json'))), 1)
+                result = self.engine.execute('prepare_panes')
+                self.assertEqual(result['holds'], [])
+                self.assertEqual([row['pane_id'] for row in result['panes']], ['w1:p1'])
+                self.assertEqual(list((self.home / 'project-manager').glob('*.json')), [])
+
+    def test_unverified_layout_retains_close_until_absence_can_be_reconciled(self):
+        self.read_worker()
+        pane = self.native.pane
+
+        def close_then_lose_layout(operation, *args, workspace=None):
+            if operation == 'layout' and self.native.closes:
+                raise Hold('transport_error', 'Layout unavailable')
+            return pane(operation, *args, workspace=workspace)
+
+        with patch.object(self.native, 'pane', side_effect=close_then_lose_layout):
+            with self.assertRaises(Hold) as error:
+                self.engine.execute('close', pane_id='w1:p2')
+            self.assertEqual(error.exception.code, 'outcome_unknown')
+        self.assertEqual(len(list((self.home / 'project-manager').glob('*.json'))), 2)
+        self.engine = Engine(self.home, self.native)
+        self.assertEqual(self.engine.execute('close', pane_id='w1:p2'), dict(pane_id='w1:p2', closed=True))
+        self.assertEqual(self.native.closes, ['w1:p2'])
+        self.assertEqual(list((self.home / 'project-manager').glob('*.json')), [])
+
+    def test_layout_failure_does_not_report_pane_absence(self):
+        self.read_worker()
+        pane = self.native.pane
+
+        def unverified_layout(operation, *args, workspace=None):
+            if operation == 'layout':
+                raise Hold('pane_not_found', 'Layout dependency did not verify the pane')
+            return pane(operation, *args, workspace=workspace)
+
+        with patch.object(self.native, 'pane', side_effect=unverified_layout):
+            with self.assertRaises(Hold) as error:
+                self.engine.execute('close', pane_id='w1:p2')
+        self.assertEqual(error.exception.code, 'pane_not_found')
+        self.assertEqual(self.native.closes, [])
+
+    def test_deferred_close_holds_while_busy_or_after_binding_change(self):
+        self.read_worker()
+        pane = self.native.pane
+
+        def lose_close_reply(operation, *args, workspace=None):
+            if operation == 'close':
+                raise Hold('outcome_unknown', 'No verified reply for pane.close_unzoomed')
+            return pane(operation, *args, workspace=workspace)
+
+        with patch.object(self.native, 'pane', side_effect=lose_close_reply):
+            self.engine.execute('close', pane_id='w1:p2')
+        self.native.result.update(state='working', active=True)
+        self.engine.execute('prepare_panes')
+        self.assertEqual(self.native.closes, [])
+        self.native.result.update(state='done', active=False, thread_id='replacement')
+        with self.assertRaises(Hold) as error:
+            self.engine.execute('close', pane_id='w1:p2')
+        self.assertEqual(error.exception.code, 'binding_unverified')
+        self.native.result.update(thread_id='thread')
+        self.native.worker.update(terminal_id='replacement')
+        self.engine.execute('prepare_panes')
+        with self.assertRaises(Hold) as error:
+            self.engine.execute('close', pane_id='w1:p2')
+        self.assertEqual(error.exception.code, 'binding_unverified')
+        self.assertEqual(self.native.closes, [])
+
     def test_zoom_and_acknowledged_attention_use_a_slot(self):
         self.native.worker['user_locked'] = True
         self.native.rows.append(self.native.worker)
