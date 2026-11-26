@@ -46,8 +46,6 @@ def register(ctx):
                 if not active():
                     return HELP + '\nProject management is disabled in this profile.'
                 return HELP + '\n' + format_result(setup(home))
-            if operation == 'prepare_panes':
-                return format_result(setup(home))
             return format_result(outcome(home, operation, args))
         except (Hold, ValueError) as exc:
             return format_result({'ok': False, 'error': exc.as_dict() if isinstance(exc, Hold) else
@@ -129,7 +127,7 @@ def register(ctx):
                         'Start the project-manager setup interview with the operator. Ask for values missing or invalid '
                         f'in skills.config.hermes-herdr-github-project-manager in {home / "config.yaml"}. '
                         'Use the installed skill profile documentation. Edit only that settings section after the user '
-                        'provides its values, then ask the operator to run /project-manager prepare-panes. '
+                        'provides its values, then ask the operator to run /project-manager. '
                         f'First validation error: {exc}'
                     )
                     with profile_context(home), suppress(Hold):

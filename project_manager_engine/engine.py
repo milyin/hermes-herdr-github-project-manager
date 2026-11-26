@@ -133,6 +133,8 @@ class Engine:
                       presence='yes', lock=lock, state='unknown', delivery='none',
                       pending_closure=raw.get('pending_closure') is True,
                       displayed_id=raw.get('displayed_id'), terminal_id=raw.get('terminal_id'))
+        if raw.get('agent_status') in ('idle', 'working', 'blocked', 'done'):
+            answer['herdr_status'] = raw['agent_status']
         if raw.get('creation_pending') is True:
             answer.update(state='starting', creation_pending=True)
             if worker:
