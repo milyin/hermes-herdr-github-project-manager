@@ -50,9 +50,13 @@ class GitHubWorkflowPrompt(unittest.TestCase):
         guide = (ROOT / 'workflows' / 'github' / 'README.md').read_text(encoding='utf-8')
         github = yaml.safe_load(re.search(r'```yaml\n(.*?)\n```', guide, re.DOTALL)[1])
         config = github['skills']['config'][SKILL]
-        config['manager']['parameters'].update(REPO=REPO, github_identity=APP)
+        config['manager']['parameters']['REPO'] = REPO
+        self.launcher = home / 'bin' / APP
+        self.launcher.parent.mkdir()
+        self.launcher.touch(mode=0o700)
         for agent in (config['manager'], *config['workers']):
             agent['working_directory'] = temporary.name
+            agent['parameters']['github_identity'] = {'profile_executable': APP}
         self.workflows = Settings.read(home, config)
         prompt = self.workflows.manager.prompt.render()[0]
         procedure = prompt.split('## Merging conditions\n', 1)[1].split('## Worker result\n', 1)[0]
@@ -123,7 +127,7 @@ class GitHubWorkflowPrompt(unittest.TestCase):
         template = self.command.substitute(pr_number='14', reviewed_head=head, verified_human_logins=humans,
                                            merge_method=method)
         launcher, *args = shlex.split(template)
-        self.assertEqual(launcher, APP)
+        self.assertEqual(launcher, str(self.launcher))
         if worker is None:
             index = args.index('--worker-verdict')
             del args[index:index + 2]
@@ -146,14 +150,14 @@ class GitHubWorkflowPrompt(unittest.TestCase):
 
     def test_reviewer_publication_is_an_exact_head_comment(self):
         prompt, _ = self.workflows.workers['reviewer'].prompt.render(
-            dict(REPO=REPO, ISSUE='12', PR='14', HEAD=HEAD, github_identity=APP))
+            dict(REPO=REPO, ISSUE='12', PR='14', HEAD=HEAD))
         command = re.search(r'```bash\n(.*?)\n```', prompt, re.DOTALL)[1].replace('\\\n', '')
         for verdict in ('clean', 'changes_requested'):
             with self.subTest(verdict=verdict):
                 body = f'Issue #12, PR #14, head {HEAD}\nVerdict: {verdict}\n  Evidence: "$PWD" → unchanged\n'
                 launcher, *args = [Template(arg).substitute(pr_number='14', reviewed_head=HEAD, review_body=body)
                                    for arg in shlex.split(command)]
-                self.assertEqual(launcher, APP)
+                self.assertEqual(launcher, str(self.launcher))
                 with (patch.object(sys, 'argv', [APP]),
                       patch('workflows.github.github_app.jwt', return_value='app-proof'),
                       patch('workflows.github.github_app.request', side_effect=self.request),

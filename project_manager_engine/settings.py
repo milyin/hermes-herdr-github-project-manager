@@ -1,5 +1,7 @@
 """Validated profile settings and single-pass prompt rendering."""
+import os
 import re
+import shlex
 import socket
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,7 +13,7 @@ except ImportError:  # Hermes installations ship ruamel.yaml.
 
 
 SKILL = 'hermes-herdr-github-project-manager'
-VARIABLE = re.compile(r'{{([a-zA-Z_][a-zA-Z_0-9]*)}}')
+VARIABLE = re.compile(r'{{([a-zA-Z_][a-zA-Z_0-9]*)(:exec)?}}')
 NAME = re.compile(r'[a-z0-9][a-z0-9-]{0,62}')
 WORKER_TAG = re.compile(r'[A-Za-z0-9]{1,4}')
 
@@ -104,6 +106,7 @@ class Prompt:
     text: str
     defaults: dict
     keys: frozenset
+    executables: dict
 
     @classmethod
     def read(cls, home, where, file, defaults, *, manager):
@@ -113,29 +116,53 @@ class Prompt:
         except (OSError, UnicodeError) as exc:
             raise Hold('invalid_config', f'{where} cannot read prompt file {path}') from exc
         require(bool(text.strip()) and '\0' not in text, f'{where} prompt is empty or invalid: {path}')
-        defaults = mapping(defaults, f'{where}.parameters')
+        defaults = dict(mapping(defaults, f'{where}.parameters'))
+        executables = {}
         for key, value in defaults.items():
-            require(re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', key)
-                    and (type(value) in (str, int, float, bool) or (value is None and not manager)),
+            require(re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', key),
                     f'{where} prompt {path} has an invalid declaration for {key}')
-        keys = frozenset(VARIABLE.findall(text))
+            if isinstance(value, dict) and value.keys() == {'profile_executable'}:
+                name = value['profile_executable']
+                require(isinstance(name, str) and NAME.fullmatch(name),
+                        f'{where}.{key} profile executable must be a basename')
+                bin_dir = home.resolve() / 'bin'
+                executable = bin_dir / name
+                require(not bin_dir.is_symlink() and not executable.is_symlink()
+                        and executable.is_file() and os.access(executable, os.X_OK),
+                        f'{where}.{key} profile executable is missing, linked, or not executable: {executable}')
+                executables[key] = defaults[key] = str(executable)
+            else:
+                require(type(value) in (str, int, float, bool) or (value is None and not manager),
+                        f'{where} prompt {path} has an invalid declaration for {key}')
+        references = VARIABLE.findall(text)
+        keys = frozenset(key for key, _ in references)
         leftover = VARIABLE.sub('', text)
         require('{{' not in leftover and '}}' not in leftover, f'{where} prompt {path} has a malformed reference')
         require(keys <= defaults.keys(), f'{where} prompt {path} uses undeclared parameters: {", ".join(sorted(keys - defaults.keys()))}')
-        return cls(path, text, defaults, keys)
+        require(all(not mode or key in executables for key, mode in references),
+                f'{where} prompt {path} requires a profile_executable declaration for executable references')
+        return cls(path, text, defaults, keys, executables)
 
     def render(self, overrides=None):
         overrides = {} if overrides is None else overrides
         if not isinstance(overrides, dict) or not all(isinstance(key, str) for key in overrides):
             raise Hold('invalid_parameters', f'Named parameters for {self.path} must be a mapping')
         for key, value in overrides.items():
-            if key not in self.keys or type(value) not in (str, int, float, bool):
+            if key not in self.keys or key in self.executables or type(value) not in (str, int, float, bool):
                 raise Hold('invalid_parameters', f'Invalid or unused parameter {key} for {self.path}')
         values = self.defaults | overrides
         for key, value in values.items():
             if value is None:
                 raise Hold('missing_parameter', f'{self.path} requires {key}', parameter=key)
-        return VARIABLE.sub(lambda match: str(values[match[1]]), self.text), values
+        substitutions = values | {key: shlex.quote(value) for key, value in self.executables.items()}
+        return VARIABLE.sub(lambda match: str(substitutions[match[1]]), self.text), values
+
+    def follow_up(self, text):
+        if not self.executables or not isinstance(text, str):
+            return text
+        commands = '\n'.join(f'{key}: {shlex.quote(value)}' for key, value in self.executables.items())
+        return (f'Current profile commands (use these exact commands, not earlier paths or PATH lookup):\n'
+                f'{commands}\n\n{text}')
 
 
 @dataclass(frozen=True)

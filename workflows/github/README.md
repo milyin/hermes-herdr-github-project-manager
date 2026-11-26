@@ -17,7 +17,7 @@ The manager tracks opted-in issues, delegates implementation and review, and pub
    }
    ```
 
-4. Run the [installer](install_proxy.py) to create a wrapper named for the App slug in a trusted profile-owned directory visible to all three roles. Use the absolute path printed by the installer, not the bare slug or a `PATH` override. Use a shell-safe path without whitespace for the prompt examples. The wrapper invokes the bundled launcher with the fixed JSON path, independent of `XDG_CONFIG_HOME`. Keep the workflow directory intact and make Python 3.10+, OpenSSL, Git, and GitHub CLI available where the wrapper runs.
+4. Run the [installer](install_proxy.py) to create the App-slug wrapper in the selected profile's `bin/` directory, visible to all three roles. The engine resolves `profile_executable` declarations there and supplies the absolute command in prompts. It refuses missing, linked or non-executable wrappers before rendering and never searches `PATH` for them. The wrapper invokes the bundled launcher with the fixed JSON path, independent of `XDG_CONFIG_HOME`. Keep the workflow directory intact and make Python 3.10+, OpenSSL, Git, and GitHub CLI available where the wrapper runs.
 
    ```sh
    python3 -B /absolute/path/to/skill/workflows/github/install_proxy.py \
@@ -58,7 +58,7 @@ The reviewer publishes a submitted GitHub comment review pinned to the reviewed 
 
 ## Profile settings
 
-Replace the models, working directories, repository, label, and absolute App wrapper path below. Set all three `github_identity` values to the same installer output. The manager passes it to both workers; matching defaults cover manual runs.
+Replace the models, working directories, repository, label, and App slug below. Set all three `github_identity.profile_executable` values to the installed wrapper's basename, not its absolute path. The engine passes the resolved command to the manager and workers; a `run` call cannot override it.
 
 ```yaml
 plugins:
@@ -83,7 +83,7 @@ skills:
           LABEL: hermes:projectmanager
           IMPLEMENTER: implementer
           REVIEWER: reviewer
-          github_identity: /absolute/path/to/profile/bin/your-app-slug
+          github_identity: {profile_executable: your-app-slug}
       workers:
         - name: implementer
           pane_tag: I
@@ -97,7 +97,7 @@ skills:
             ISSUE: none
             PR: none
             TASK: null
-            github_identity: /absolute/path/to/profile/bin/your-app-slug
+            github_identity: {profile_executable: your-app-slug}
         - name: reviewer
           pane_tag: R
           agent: codex
@@ -110,7 +110,7 @@ skills:
             ISSUE: null
             PR: null
             HEAD: null
-            github_identity: /absolute/path/to/profile/bin/your-app-slug
+            github_identity: {profile_executable: your-app-slug}
 ```
 
 ## Update an existing GitHub profile
@@ -128,7 +128,7 @@ If the existing App JSON uses the legacy fields below, create a separate JSON fi
 
 Reuse the existing key in place. Put only its path in `private_key`, and keep the key file private and owned by the running user. If the old value starts with `~/`, expand it using the original user's home directory. Resolve a relative path from the working directory the legacy launcher used, and use the path to the regular key file if the old path is a symlink.
 
-Pass the new JSON's absolute path to `install_proxy.py --config` as shown in step 4. A JSON file that already uses the proxy fields can be passed directly. If a shared bin directory already contains that App slug, install into a separate trusted profile directory. Set all three `github_identity` values to the new absolute wrapper path without changing the shared launcher. Previously sent worker prompts are not updated by settings changes; use a fresh assignment or explicitly supply the new path in a follow-up.
+Pass the new JSON's absolute path to `install_proxy.py --config` as shown in step 4. A JSON file that already uses the proxy fields can be passed directly. Leave the shared launcher unchanged. Replace all three scalar `github_identity` settings with a `profile_executable` declaration for the same App slug. Previously delivered prompts are not rewritten; the engine supplies the current command automatically on `steer`.
 
 If any of the three `prompt_file` values still use `doc/`, replace only those values. These examples are relative to the profile directory. For absolute paths, keep the checkout prefix and replace the part after it.
 

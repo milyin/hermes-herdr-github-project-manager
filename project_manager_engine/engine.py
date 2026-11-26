@@ -555,6 +555,8 @@ class Engine:
                 or row['pending_closure']):
             raise Hold('not_idle', 'The bound worker pane is unavailable for a follow-up', pane_id=pane_id)
         worker = self.worker(row['worker'])
+        prompt = worker.prompt.follow_up(prompt)
+        validate_worker_prompt(prompt)
         account = self.check_admission(worker)
         if launch := self.pane_launch(pane_id):
             self.finish_launch(launch, row)

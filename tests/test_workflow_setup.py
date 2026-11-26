@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import yaml
 
-from project_manager_engine.settings import SKILL, Settings
+from project_manager_engine.settings import Hold, SKILL, Settings
 from workflows.github.ensure_github_label import ensure_label
 
 
@@ -42,10 +42,13 @@ class BundledWorkflows(unittest.TestCase):
                 agent['working_directory'] = str(self.home)
 
     def test_github_example_renders_scoped_commands_for_all_roles(self):
-        launcher = self.github['manager']['parameters']['github_identity']
-        self.assertTrue(Path(launcher).is_absolute())
+        declaration = self.github['manager']['parameters']['github_identity']
+        self.assertEqual(declaration, {'profile_executable': 'your-app-slug'})
+        launcher = self.home / 'bin' / declaration['profile_executable']
+        launcher.parent.mkdir()
+        launcher.touch(mode=0o700)
         for worker in self.github['workers']:
-            self.assertEqual(worker['parameters']['github_identity'], launcher)
+            self.assertEqual(worker['parameters']['github_identity'], declaration)
         self.github['manager']['parameters']['REPO'] = REPO
         settings = Settings.read(self.home, self.github)
         manager, _ = settings.manager.prompt.render()
@@ -56,9 +59,11 @@ class BundledWorkflows(unittest.TestCase):
         for prompt in (manager, implementer, reviewer):
             for action in ('gh', 'git'):
                 self.assertIn(f'{launcher} --repo {REPO} {action}', prompt)
-            self.assertIn('Do not search PATH for a replacement', prompt)
             self.assertIn('Do not use personal accounts', prompt)
-        self.assertIn(f'Pass `github_identity` as `{launcher}` to both workers', manager)
+        self.assertIn('do not pass it as a task parameter', manager)
+        follow_up = settings.workers['reviewer'].prompt.follow_up('Do the next task.\n  Keep whitespace.')
+        self.assertIn(f'github_identity: {launcher}', follow_up)
+        self.assertTrue(follow_up.endswith('\n\nDo the next task.\n  Keep whitespace.'))
 
     def test_demo_example_renders_without_github_configuration(self):
         settings = Settings.read(self.home, self.demo)
@@ -68,6 +73,30 @@ class BundledWorkflows(unittest.TestCase):
         worker, params = settings.workers['hello'].prompt.render()
         self.assertEqual(params, {})
         self.assertIn('Hello from the project-manager demo!', worker)
+
+    def test_profile_executable_is_pinned_by_code_and_cannot_be_overridden(self):
+        config = self.demo
+        manager = config['manager']
+        path = self.home / 'manager.md'
+        path.write_text('Use {{launcher:exec}}', encoding='utf-8')
+        manager.update(prompt_file=str(path), parameters={'launcher': 'example-app'})
+        with self.assertRaisesRegex(Hold, 'requires a profile_executable declaration'):
+            Settings.read(self.home, config)
+        manager['parameters']['launcher'] = {'profile_executable': 'example-app'}
+        with self.assertRaisesRegex(Hold, 'profile executable'):
+            Settings.read(self.home, config)
+        launcher = self.home / 'bin' / 'example-app'
+        launcher.parent.mkdir()
+        launcher.symlink_to('/bin/sh')
+        with self.assertRaisesRegex(Hold, 'profile executable'):
+            Settings.read(self.home, config)
+        launcher.unlink()
+        launcher.write_text('#!/bin/sh\n', encoding='utf-8')
+        launcher.chmod(0o700)
+        prompt = Settings.read(self.home, config).manager.prompt
+        self.assertEqual(prompt.render(), (f'Use {launcher}', {'launcher': str(launcher)}))
+        with self.assertRaisesRegex(Hold, 'Invalid or unused parameter'):
+            prompt.render({'launcher': '/bin/sh'})
 
 
 class StartupInterview(unittest.TestCase):
