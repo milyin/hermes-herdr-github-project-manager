@@ -71,7 +71,7 @@ The agent manager handles recoverable worker problems in the bound session. For 
 
 ## Cron tick
 
-Run one no-agent watchdog job per profile. Each tick follows this order:
+Run one no-agent watchdog job per enabled profile. Each tick reads the profile and exits before touching panes or turns if `enabled` is missing or false. Each enabled tick follows this order:
 
 1. Use the manager portion of `prepare-panes` to verify the workspace and recover the manager pane when necessary. Use the pane query for its effective state. End this tick unless the TUI is attached to its unlocked pane and the gateway confirms the bound session is idle with no unresolved watchdog submission.
 2. Use the worker portion of `prepare-panes` to retry deferred closes, verify worker completions and escalations through the agent manager, and update worker suffixes.

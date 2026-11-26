@@ -1,8 +1,12 @@
 # Project-manager profile
 
-Open the configured profile with `hermes -p projectmanager`. An enabled profile with missing settings starts the setup interview. The startup integration validates the settings, ensures the selected profile's Hermes gateway and scheduler are running, and enables one no-agent cron watchdog for the profile. It runs the watchdog immediately to prepare the workspace and open the [manager conversation in a Hermes TUI pane](WORKFLOW.md#manager-conversation). The managed TUI uses the prepared binding and skips the setup interview.
+## First run
 
-Setup is ready when the manager pane is attached to its gateway conversation and the profile's scheduler is active. Opening the profile again reuses the verified workspace, manager conversation, pane, and cron job. The gateway and scheduler keep running after the setup session ends. [Hermes cron scheduler](https://hermes-agent.nousresearch.com/docs/guides/cron-troubleshooting#check-3-is-the-gateway-running)
+With the project-manager integration installed, set `enabled: true` in the profile settings below and open the profile with `hermes -p projectmanager`. An interactive launch starts the setup interview if required settings are missing. A missing flag or `enabled: false` skips startup. The managed TUI uses its prepared binding and skips setup.
+
+After validating the settings, the integration starts or verifies the selected profile's Hermes gateway and scheduler and registers one no-agent watchdog for that profile. It immediately runs pane preparation to open the [manager conversation in a Hermes TUI pane](WORKFLOW.md#manager-conversation). Opening the profile again reuses the verified workspace, manager conversation, pane, and cron job. The gateway and scheduler keep running after the setup session ends.
+
+Use Hermes cron status and run history to verify the watchdog. Report scheduler verification as pending until the watchdog records a successful scheduled run. Successful pane preparation confirms the pane is ready. A scheduled tick that exits normally without work confirms the watchdog ran. Report an overdue or failed first scheduled run with the scheduler's reason when available. [Hermes cron scheduler](https://hermes-agent.nousresearch.com/docs/guides/cron-troubleshooting#check-3-is-the-gateway-running)
 
 ## Settings
 
@@ -14,6 +18,7 @@ This example configures the GitHub workflow with its [manager](MANAGER_PROMPT.md
 skills:
   config:
     hermes-herdr-github-project-manager:
+      enabled: true
       herdr:
         instance: default
       max_working_panes: 1
