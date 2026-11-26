@@ -377,7 +377,17 @@ class Engine:
                 self.rename(raw['pane_id'], 'status', 'MGR')
                 matches = [dict(raw, creation_pending=False)]
         raw = self.native.prepare_manager(self.workspace_id, matches[0] if matches else None)
-        return self.row(raw) if raw else None
+        if not raw:
+            return None
+        row = self.row(raw)
+        if row['lock'] == 'unlocked' and row.get('watchdog_interrupted'):
+            try:
+                self.native.recover_manager(row)
+            except Hold as exc:
+                row['reason'] = exc.as_dict()
+            else:
+                row = self.row(raw)
+        return row
 
     def prepare_workers(self):
         holds = []

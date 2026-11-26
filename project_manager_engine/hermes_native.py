@@ -18,6 +18,7 @@ from .settings import Hold
 ROOT = Path(__file__).resolve().parents[1]
 TOOLSET = 'project_manager'
 GROUP = 'project-manager'
+WATCHDOG_INPUT = 'herdr-project-manager-'
 
 
 def isolated_python(script, *args, packages=()):
@@ -199,11 +200,19 @@ class Native:
                     raise Hold('session_changed', 'Hermes returned a different manager conversation')
                 if action == 'snapshot':
                     return snapshot
+                if action == 'recover_admission':
+                    row = interrupted_watchdog(snapshot, sid)
+                    if row is not None:
+                        return await gateway.rpc('prompt.resolve_unknown', session_id=sid,
+                                                 admission_id=row['admission_id'],
+                                                 execution_generation=row['execution_generation'],
+                                                 _timeout=15)
+                    return {}
                 if not idle_snapshot(snapshot):
                     raise Hold('manager_busy', 'The Hermes conversation has running or queued input')
                 message, = rest
                 receipt = await gateway.rpc('prompt.submit', session_id=sid, text=message,
-                                            submission_id=secrets.token_hex(16), _timeout=15)
+                                            submission_id=WATCHDOG_INPUT + secrets.token_hex(16), _timeout=15)
                 if ((receipt.get('ref') or {}).get('session_id') != sid
                         or not isinstance(receipt.get('admission_id'), str)):
                     raise Hold('outcome_unknown', 'Hermes did not confirm the exact admission')
@@ -294,9 +303,10 @@ class Native:
         state = ('blocked' if snapshot.get('prompts') or snapshot.get('open_requests') else
                  'idle' if idle_snapshot(snapshot) else 'working')
         return dict(attached=True, session_id=sid, state=state,
-                    pending=[row.get('admission_id') for row in pending] if isinstance(pending, list) else None)
+                    pending=[row.get('admission_id') for row in pending] if isinstance(pending, list) else None,
+                    watchdog_interrupted=interrupted_watchdog(snapshot, sid) is not None)
 
-    def submit(self, row, message):
+    def verify_manager_target(self, row):
         pane = row['pane_id']
         binding = self.binding
         workspace, sid = binding['workspace'], binding['session_id']
@@ -308,9 +318,28 @@ class Native:
         lock = self.pane('lock-status', '--pane', pane, workspace=workspace)
         if lock.get('user_locked') is not False:
             raise Hold('manager_locked', 'The operator has locked the manager pane')
-        return self.gateway('submit', sid, message)
+        return sid
+
+    def submit(self, row, message):
+        return self.gateway('submit', self.verify_manager_target(row), message)
+
+    def recover_manager(self, row):
+        return self.gateway('recover_admission', self.verify_manager_target(row))
 
 
 def idle_snapshot(snapshot):
     return (snapshot.get('running') is False and snapshot.get('pending') == []
             and not snapshot.get('prompts') and not snapshot.get('open_requests'))
+
+
+def interrupted_watchdog(snapshot, session_id):
+    pending = snapshot.get('pending')
+    if snapshot.get('running') is not False or not isinstance(pending, list) or not pending:
+        return None
+    row = pending[0]
+    if (isinstance(row, dict) and row.get('status') == 'unknown'
+            and (row.get('ref') or {}).get('session_id') == session_id
+            and str(row.get('input_id', '')).startswith(WATCHDOG_INPUT)
+            and isinstance(row.get('admission_id'), str) and type(row.get('execution_generation')) is int):
+        return row
+    return None
