@@ -1,4 +1,4 @@
-"""Run the rendered GitHub workflow merge command with isolated API fixtures."""
+"""Check the rendered GitHub workflow with isolated fixtures."""
 
 from contextlib import redirect_stdout
 from copy import deepcopy
@@ -38,6 +38,11 @@ AUTHOR = {'login': 'author', 'id': 1, 'type': 'User'}
 
 def review(state='APPROVED', *, number=1, head=HEAD, user=REVIEWER):
     return dict(id=number, state=state, commit_id=head, user=user, submitted_at='2026-11-26T10:00:00Z')
+
+
+def prompt_section(prompt, heading):
+    section, = re.findall(rf'^## {re.escape(heading)}\n(.*?)(?=^## |\Z)', prompt, re.MULTILINE | re.DOTALL)
+    return section.strip()
 
 
 class GitHubWorkflowPrompt(unittest.TestCase):
@@ -131,10 +136,14 @@ class GitHubWorkflowPrompt(unittest.TestCase):
             args[args.index('--worker-verdict') + 1] = worker
         if not clear:
             args.remove('--feedback-clear')
+        return self.run_app(args)
+
+    def run_app(self, args, scheduler_request=None):
         self.review_reads = 0
         self.calls.clear()
         stdout = StringIO()
-        with (patch.object(sys, 'argv', [APP]), redirect_stdout(stdout),
+        with (patch.object(sys, 'argv', [APP]), patch.object(sys, 'stdin', StringIO(json.dumps(scheduler_request))),
+              redirect_stdout(stdout),
               patch('workflows.github.github_app.jwt', return_value='app-proof'),
               patch('workflows.github.github_app.request', side_effect=self.request)):
             self.assertEqual(main(args, config_path=self.config_path), 0)
@@ -143,6 +152,41 @@ class GitHubWorkflowPrompt(unittest.TestCase):
     def assert_hold(self, status='Need attention', **options):
         self.assertEqual(self.run_command(**options)['status'], status)
         self.assertFalse(any(method in {'PUT', 'PATCH', 'DELETE'} for method, _, _ in self.calls))
+
+    def test_rendered_manager_reads_pr_facts_and_calls_the_same_scheduler_for_both_events(self):
+        prompt = self.workflows.manager.prompt.render({'REVIEWER': 'review-prod'})[0]
+        facts_line = next(line for line in prompt.splitlines() if ' pr-facts --pr ' in line)
+        launcher, *args = shlex.split(Template(facts_line).substitute(pr_number='14'))
+        self.assertEqual(launcher, APP)
+        self.pull['mergeable'] = 'UNKNOWN'
+        facts = self.run_app(args)
+        self.assertEqual(facts, dict(number=14, headRefOid=HEAD, state='OPEN', isDraft=False, mergeable='UNKNOWN',
+                                     autoMergeRequest=None, isInMergeQueue=False))
+        self.assertEqual(self.calls[-1][:2], ('POST', '/graphql'))
+        self.assertIn('mergeable', self.calls[-1][2]['query'])
+
+        schedule_line = next(line for line in prompt.splitlines() if ' schedule --implementer ' in line)
+        launcher, *args = shlex.split(schedule_line.split(' < ', 1)[0])
+        self.assertEqual(launcher, APP)
+        self.assertIn('event: periodic', prompt)
+        self.assertIn('event: worker_result', prompt)
+        self.assertIn('Only the top-level `dispatch` authorizes a worker call.', prompt)
+        self.assertIn('before calling `project_manager_run` or `project_manager_steer`', prompt)
+
+        checkout = dict(worker='review-prod', working_directory='/fixture/checkout', ready=True, hold=None)
+        entry = dict(issue=12, pr=14, pull=facts, placement='In review → Queue', eligible=True, feedback='clear',
+                     pending_feedback=[], handoff=dict(kind='review', pr=14, head=HEAD, feedback_ids=[], checkout=checkout))
+        request = dict(queued_at_start=[12], entries=[entry], capacity=dict(available=1, workers={'review-prod': {
+            'ready': True,
+        }}))
+        ids = dict(pane_id='w1:p1', turn_id='last-turn')
+        event = dict(ids, recorded=True, acknowledgment=dict(ok=True, result=dict(ids, delivery='read')))
+        periodic = self.run_app(args, dict(request, event='periodic'))
+        follow_up = self.run_app(args, dict(request, event='worker_result', worker_result=event))
+        self.assertEqual(periodic['dispatch'], follow_up['dispatch'])
+        self.assertEqual(follow_up['dispatch']['head'], HEAD)
+        self.assertEqual(follow_up['dispatch']['worker'], 'review-prod')
+        self.assertTrue(all(path != '/graphql' for _, path, _ in self.calls))
 
     def test_reviewer_publication_is_an_exact_head_comment(self):
         prompt, _ = self.workflows.workers['reviewer'].prompt.render(
@@ -172,7 +216,7 @@ class GitHubWorkflowPrompt(unittest.TestCase):
     def test_rendered_workflow_and_qualifying_write(self):
         for required in ('clean verdict', 'no outstanding actionable feedback', 'required checks',
                          'even if GitHub requires zero approvals', 'after checking collaborator access',
-                         'Leave auto-merge and queue admission to the operator'):
+                         'Leave auto-merge and merge queue admission to the operator'):
             self.assertIn(required, self.procedure)
         self.assertEqual(self.run_command(), dict(status='Merged', head=HEAD, merge_sha=MERGE_SHA))
         self.assertEqual([(method, path) for method, path, _ in self.calls[-8:]], [
@@ -201,6 +245,17 @@ class GitHubWorkflowPrompt(unittest.TestCase):
 
     def test_holds_for_a_github_review_requirement(self):
         self.pull.update(reviewDecision='REVIEW_REQUIRED', mergeStateStatus='BLOCKED')
+        self.assertEqual(self.run_command(), dict(status=WAITS, pr=14, head=HEAD))
+        self.assertFalse(any(method == 'PUT' for method, _, _ in self.calls))
+
+    def test_mergeability_is_checked_before_reporting_an_approval_hold(self):
+        self.pull['reviewDecision'] = 'REVIEW_REQUIRED'
+        for value, reason in (('CONFLICTING', 'Merge conflict'), ('UNKNOWN', 'Awaiting mergeability verification')):
+            with self.subTest(value=value):
+                self.pull['mergeable'] = value
+                self.assertEqual(self.run_command(), dict(status='Need attention', reason=reason))
+                self.assertFalse(any(method == 'PUT' for method, _, _ in self.calls))
+        self.pull['mergeable'] = 'MERGEABLE'
         self.assert_hold(WAITS)
 
     def test_holds_for_queue_rule_or_disallowed_merge_method(self):
@@ -285,5 +340,6 @@ class GitHubWorkflowPrompt(unittest.TestCase):
         self.merge_response = GitHubError('Unconfirmed write')
         result = self.run_command()
         self.assertEqual(result['status'], 'Need attention')
+        self.assertEqual((result['outcome'], result['pr'], result['head']), ('unconfirmed', 14, HEAD))
         self.assertIn('Reconcile GitHub state', result['reason'])
         self.assertEqual(sum(method == 'PUT' for method, _, _ in self.calls), 1)

@@ -35,7 +35,7 @@ The manager tracks opted-in issues, delegates implementation and review, and pub
 
 ## Using the launcher
 
-Pass `--repo OWNER/REPO` before the action. Use `gh` for supported issue and PR commands and repository REST endpoints. Put the endpoint first after `gh api`. Use numeric issue and PR selectors for CLI commands, and pass `--head` to `gh pr create` after pushing through the launcher. Use the checked `merge-reviewed` action for direct merges.
+Pass `--repo OWNER/REPO` before the action. Use `gh` for supported issue and PR commands and repository REST endpoints. Put the endpoint first after `gh api`. Use numeric issue and PR selectors for CLI commands, and pass `--head` to `gh pr create` after pushing through the launcher. Use the checked `merge-reviewed` action for direct merges. The manager uses `pr-facts` for an exact-head PR snapshot and `schedule` for GitHub workflow decisions.
 
 Pass the exact credential-free HTTPS repository or wiki URL to remote Git commands. Run the command from the intended checkout. Push an explicit branch refspec. For example:
 
@@ -47,6 +47,49 @@ APP_SLUG --repo OWNER/REPO git push https://github.com/OWNER/REPO.git HEAD:refs/
 Each invocation verifies the configured App and repository before dispatch. Use `APP_SLUG --repo OWNER/REPO status` to inspect the actor, repository, and permissions. Native Git and GitHub CLI commands use isolated configuration and repository-scoped App credentials. The launcher scopes the operations it handles, and the workflow prompts require its use. Use operator-managed execution controls if a session must be restricted to the launcher.
 
 GitHub's merge readiness and active branch rules are checked before the direct merge. The workflow also requires a clean worker verdict, cleared actionable feedback, and an active independent human approval for the exact head. The manager supplies the verdict and feedback decision from verified workflow records. The SHA pin guards against head changes. Review state can still change between the final read and the write. GitHub branch rules supply any server-side review enforcement. [Merge instructions](MANAGER_PROMPT.md#merging-conditions) · [GitHub merge endpoint](https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request)
+
+## Dashboard queues
+
+The dashboard lists **Need attention**, **In progress**, **In review**, and **Done** in that order. Each issue has one entry. Ready implementation work and follow-ups wait under **In progress → Queue**, and ready PR heads wait under **In review → Queue** when all worker slots are occupied. Operator blockers and PRs queued or scheduled for merge in GitHub stay in **Need attention**.
+
+**Awaiting human approval** holds merge attempts for the exact PR head with a clean worker verdict and clear feedback. A changed head or new actionable feedback clears that hold so the manager can schedule the required review or implementation follow-up.
+
+The manager uses the same scheduler on a periodic turn and after recording a worker result. Eligible work already queued at the beginning of the turn goes first, followed by other tracked work and then new issues on periodic turns. The manager saves and acknowledges the exact result before scheduling. It verifies admission before moving the entry to the active list and recording the admitted feedback as assigned. Pending feedback and interrupted dispatch identifiers stay on the same issue entry. [Shared scheduling](MANAGER_PROMPT.md#shared-scheduling)
+
+## Scheduler input
+
+Run `APP_SLUG --repo OWNER/REPO pr-facts --pr NUMBER` to obtain the `pull` record for an entry. The scoped App read includes the PR's full current head, state, draft status, mergeability, and current merge-queue and auto-merge facts. `CONFLICTING` blocks merge. `UNKNOWN` waits for verification. A fresh `MERGEABLE` snapshot clears the mergeability blocker. Worker review and implementation can proceed subject to the dispatch rules.
+
+Run `APP_SLUG --repo OWNER/REPO schedule --implementer NAME --reviewer NAME` with one JSON object on stdin. Use the worker names from the profile. The command returns decisions as JSON. The manager applies them using its existing wiki and worker tools.
+
+| Request field | Source |
+| --- | --- |
+| `event` | `periodic` or `worker_result`. |
+| `queued_at_start` | Ordered numeric issue IDs from both queues, captured before changing the dashboard and reused throughout the turn. |
+| `new_intake` | Numeric IDs of newly discovered issues on a periodic turn, even if an entry for one of them is created during the turn. |
+| `attempted` | Numeric issue IDs already sent to `run` or `steer` this turn. Start with an empty list. |
+| `capacity` | Latest `result` from a successful `project_manager_capacity` call, including `available` and `workers`. Refresh after each attempt and after checking an intended checkout. |
+| `worker_result` | On a worker-result turn, the verified event's `pane_id` and `turn_id`. Set `recorded: true` after saving the result and its evidence. Set `acknowledgment` to the full `project_manager_mark_read` response once available. |
+| `entries` | One record per numeric issue, in dashboard order followed by new intake. |
+
+| Entry field | Source |
+| --- | --- |
+| `issue`, `placement`, `eligible` | Numeric issue ID, exact dashboard section name (including ` → Queue` as applicable), and verified issue eligibility. Use `placement: null` for new intake after checking the dashboard and worker assignments. |
+| `pr`, `pull` | Numeric current PR ID if known and the verified `pr-facts` record for that PR. |
+| `verdict` | Verified worker `pr`, full `head`, and `verdict` (`clean` or `changes_requested`). Preserve the old verdict as evidence when the target head changes. |
+| `approval_hold` | The saved `pr` and full `head` from **Awaiting human approval**. For a legacy display status, pass the saved PR, or `{}` if the entry's PR is the only saved scope. The helper can recover the SHA from a verified clean verdict for that PR. |
+| `merge_check` | The checked merge blocker with `pr`, `head`, `reason`, and optional `outcome`. Keep an unconfirmed write until GitHub confirms the outcome or verifies that the original write did not take effect. |
+| `feedback`, `pending_feedback`, `assigned_feedback` | Your interpretation of verified feedback (`clear`, `actionable`, or `unknown`), plus the pending and assigned lists of unique string IDs. Preserve source references on the dashboard. |
+| `pending_work` | `implementation` or `review` for explicit follow-up work, or null. |
+| `active_assignment`, `blocker` | Current verified assignment, with pane, turn and head when applicable, or null. Supply any verified worker or operator blocker as a short status string. Pass mergeability through `pull`. |
+| `handoff` | `kind`, `pr`, `head` (use null for a missing PR or head), and `feedback_ids` for the complete prepared prompt. Use null until the prompt and evidence match this work. For a run, `checkout` is the `result.preflight` from `project_manager_capacity` for the selected worker and working directory. An optional `steer` object contains the verified `issue`, `worker`, `pane_id`, `thread_id`, `turn_id` (null if no prior turn), `lock`, `state`, `pending_closure`, and `quota_ready` from a verified quota observation. |
+| `dispatch`, `receipt`, `recovery` | Persist the selected dispatch object before using the worker tool. Pass the entire tool response as `receipt` for that recorded attempt. Use `recovery` only for verified evidence from the original binding. |
+
+The scheduler may return `prepare_checkout` for the highest-priority item before it can authorize a run. Check the intended checkout and resubmit the snapshot. A `dispatch` for a run includes the preflighted `working_directory`. An open draft can receive eligible implementation follow-ups on its exact head. Review and merge wait until the PR is ready for review.
+
+A recovery record includes `issue`, `operation`, `worker`, `pr`, `head`, and `state` (`admitted` or `not_attempted`). For `run`, include the original `working_directory`. For `steer`, include the original `pane_id`, `thread_id`, and `previous_turn_id`. An admitted attempt includes the verified `pane_id` and `turn_id`, plus `thread_id` if the target binding is known. For a verified unsubmitted launch, set `launch_cleared: true` only after resolving any retained pane. A missing pane or a previous turn by itself leaves the original attempt unresolved.
+
+The top-level `dispatch` is the only authorization for the next worker call. `decisions` carry the issue placement, any status update, approval hold, mergeability blocker, pending target, and action. Keep the saved handoff evidence and feedback lists unless a verified admission supplies replacements. A `pending_work` record is a target for the handoff writer. Retain an unresolved `dispatch` until a decision returns `clear_dispatch: true`. Before a worker result is recorded and acknowledged, decisions can reconcile existing attempts, including an admission first verified by that result. Save the reconciliation before recording and acknowledging the result. A `merge_candidate` is checked by `merge-reviewed` before GitHub receives a merge write.
 
 ## Worker handoffs
 

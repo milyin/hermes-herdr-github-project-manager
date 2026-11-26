@@ -671,6 +671,76 @@ worker.join()
                                     capacity=dict(maximum=1, available=1, occupied_states={})))
         self.assertEqual(self.native.submissions, [{'type': 'periodic'}])
 
+    def test_github_scheduler_can_run_in_a_separate_checkout_when_the_default_is_occupied(self):
+        from workflows.github.scheduler import plan
+
+        parked = dict(pane_id='w1:parked', terminal_id='parked-terminal', status='I:READ', user_locked=False)
+        parked_status = dict(self.native.result, thread_id='parked-thread', turn_id='parked-turn')
+        default = parked_status['working_directory']
+        checkout = self.home / 'pr-26'
+        checkout.mkdir()
+        self.native.rows.append(parked)
+        native_agent = self.native.agent
+
+        def agent(operation, workspace, pane, *args, **kwargs):
+            if pane == parked['pane_id']:
+                self.assertEqual(operation, 'status')
+                return dict(parked_status)
+            return native_agent(operation, workspace, pane, *args, **kwargs)
+
+        with patch.object(self.native, 'agent', side_effect=agent):
+            capacity = self.engine.execute('capacity')
+            self.assertEqual(capacity['available'], 1)
+            self.assertEqual(capacity['workers']['worker']['hold'], 'directory_in_use')
+            self.assertEqual(self.engine.execute('tick')['event'], 'periodic')
+            self.assertEqual(self.native.submissions, [{'type': 'periodic'}])
+
+            op, options = parse(f'capacity --worker worker --cwd {checkout}')
+            checked = self.engine.execute(op, **options)
+            self.assertEqual(checked['preflight'], dict(worker='worker', working_directory=str(checkout),
+                                                        ready=True, hold=None))
+            blocked = self.engine.execute('capacity', worker='worker', working_directory=default)
+            self.assertEqual(blocked['preflight']['hold'], 'directory_in_use')
+            self.native.quota_hold = True
+            quota = self.engine.execute(op, **options)
+            self.assertEqual(quota['preflight']['hold'], 'quota_behind_pace')
+            self.native.quota_hold = False
+            with patch.object(self.native, 'preflight', side_effect=Hold('worker_unavailable', 'Worker unavailable')):
+                unavailable = self.engine.execute(op, **options)
+                self.assertEqual(unavailable['preflight']['hold'], 'worker_unavailable')
+            self.assertEqual(self.native.rows, [self.native.manager, parked])
+
+            head = 'a' * 40
+            handoff = dict(kind='review', pr=26, head=head, feedback_ids=[])
+            pull = dict(number=26, headRefOid=head, state='OPEN', isDraft=False, mergeable='MERGEABLE',
+                        autoMergeRequest=None, isInMergeQueue=False)
+            entry = dict(issue=25, pr=26, pull=pull, eligible=True, placement='In review → Queue',
+                         feedback='clear', pending_feedback=[], handoff=handoff)
+            ids = dict(pane_id=parked['pane_id'], turn_id=parked_status['turn_id'])
+            ack = self.engine.execute('mark_read', **ids)
+            report = dict(ids, recorded=True, acknowledgment=dict(ok=True, result=ack))
+            options = dict(implementer='unused', reviewer='worker')
+            for event in ('periodic', 'worker_result'):
+                with self.subTest(event=event):
+                    request = dict(event=event, worker_result=report, entries=[entry], queued_at_start=[25],
+                                   capacity=capacity)
+                    prepared = plan(request, **options)
+                    self.assertEqual(prepared['prepare_checkout']['worker'], 'worker')
+                    self.assertIsNone(prepared['dispatch'])
+                    request.update(entries=[dict(entry, handoff=dict(handoff, checkout=checked['preflight']))],
+                                   capacity=checked)
+                    dispatch = plan(request, **options)['dispatch']
+                    self.assertEqual(dispatch['working_directory'], str(checkout))
+
+            with self.assertRaises(Hold) as held:
+                self.engine.execute('run', name='worker', working_directory=default, parameters={'TASK': 'review'})
+            self.assertEqual((held.exception.code, held.exception.details['admission']),
+                             ('directory_in_use', 'not_attempted'))
+            receipt = self.engine.execute('run', name=dispatch['worker'], working_directory=dispatch['working_directory'],
+                                          parameters={'TASK': 'review'})
+            self.assertEqual(receipt['admission'], 'accepted')
+            self.assertEqual(self.native.runs, 1)
+
     def test_result_is_delivered_while_another_worker_fills_capacity(self):
         busy = dict(self.native.worker, pane_id='w1:p3', terminal_id='t3')
         self.native.rows.extend([self.native.worker, busy])
@@ -691,6 +761,27 @@ worker.join()
                                     capacity=dict(maximum=1, available=0, occupied_states={'w1:p3': 'working'})))
         self.assertEqual(self.native.submissions, [dict(type='worker_result', worker='worker',
                                                         pane_id='w1:p2', turn_id='turn', message='finished')])
+
+    def test_capacity_refusal_allows_one_submission_when_the_slot_frees(self):
+        self.native.rows.append(self.native.worker)
+        self.native.result.update(state='working', active=True)
+        self.assertEqual(self.engine.execute('capacity')['available'], 0)
+        with self.assertRaises(Hold) as refused:
+            self.engine.execute('run', name='worker', parameters={'TASK': 'next task'})
+        self.assertEqual(refused.exception.code, 'capacity')
+        self.assertEqual(self.engine.execute('capacity')['unresolved_launches'], [])
+        self.assertEqual(self.native.runs, 0)
+
+        self.native.rows.remove(self.native.worker)
+        self.assertEqual(self.engine.execute('capacity')['available'], 1)
+        admitted = self.engine.execute('run', name='worker', parameters={'TASK': 'next task'})
+        self.assertEqual((admitted['admission'], admitted['pane_id'], admitted['turn_id']),
+                         ('accepted', 'w1:p2', 'turn'))
+        with self.assertRaises(Hold) as duplicate:
+            self.engine.execute('run', name='worker', parameters={'TASK': 'next task'})
+        self.assertEqual(duplicate.exception.code, 'already_started')
+        self.assertEqual(duplicate.exception.details['turn_id'], admitted['turn_id'])
+        self.assertEqual(self.native.runs, 1)
 
     def test_zoom_and_acknowledged_attention_use_a_slot(self):
         self.native.worker['user_locked'] = True

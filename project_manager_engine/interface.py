@@ -42,7 +42,8 @@ TOOLS = {
     'close': ('Close an idle worker pane or mark it for deferred closure.', ('pane_id',), PANE),
     'workers': ('List configured workers and prompt parameter declarations.', (), {}),
     'panes': ('Inspect live manager and worker panes, optionally filtering the results.', (), FILTERS),
-    'capacity': ('Check available worker slots and launch readiness.', (), {}),
+    'capacity': ('Check available worker slots and launch readiness. Supply a worker and its working directory '
+                 'to preflight that launch.', (), bulk_properties('worker working_directory')),
     'quota': ('Inspect quota observations and holds for configured worker accounts.', (), bulk_properties('worker')),
 }
 class Parser(argparse.ArgumentParser):
@@ -72,8 +73,10 @@ def parser():
             for name, schema in FILTERS.items():
                 option = {'presence': 'present', 'pane_id': 'pane'}.get(name, name)
                 command_config.add_argument('--' + option, dest=name, choices=schema.get('enum'))
-        if command == 'quota':
+        if command in ('quota', 'capacity'):
             command_config.add_argument('--worker')
+        if command == 'capacity':
+            command_config.add_argument('--cwd', dest='working_directory')
     return cli
 
 

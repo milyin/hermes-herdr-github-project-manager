@@ -38,15 +38,30 @@ def hold(reason):
     return {'status': 'Need attention', 'reason': reason}
 
 
-def pull_snapshot(installation, args):
+def verified_pull(installation, number):
+    if not positive_id(number) or number > 2**31 - 1:
+        raise ValueError('A numeric PR number is required')
     owner, name = installation.repository.split('/')
-    repository = installation.graphql(PULL_REQUEST, dict(owner=owner, name=name, number=args.pr))['repository']
+    repository = installation.graphql(PULL_REQUEST, dict(owner=owner, name=name, number=number))['repository']
     if repository['nameWithOwner'].casefold() != installation.repository.casefold():
         raise ValueError('Unverified repository')
     pull = repository['pullRequest']
-    head = pull['headRefOid']
-    if not SHA.fullmatch(head):
+    if not SHA.fullmatch(pull['headRefOid']):
         raise ValueError('Unverified head')
+    return repository, pull
+
+
+def mergeability_hold(value):
+    if value == 'MERGEABLE':
+        return None
+    if value == 'CONFLICTING':
+        return 'Merge conflict'
+    return 'Awaiting mergeability verification'
+
+
+def pull_snapshot(installation, args):
+    repository, pull = verified_pull(installation, args.pr)
+    head = pull['headRefOid']
     if head != args.reviewed_head:
         return pull, {'status': 'Head changed', 'head': head}
     if pull['state'] != 'OPEN' or pull['isDraft'] is not False:
@@ -55,6 +70,8 @@ def pull_snapshot(installation, args):
         return pull, hold('Pull request is queued or already scheduled for merge')
     if pull['isMergeQueueEnabled'] is not False:
         return pull, hold('The base branch requires a merge queue')
+    if reason := mergeability_hold(pull['mergeable']):
+        return pull, hold(reason)
     base = pull['baseRefName']
     author = pull['author']['login'].lower()
     if not base or not ACCOUNT_LOGIN.fullmatch(author):
@@ -77,8 +94,8 @@ def pull_snapshot(installation, args):
                 if args.method not in allowed:
                     return pull, hold('Merge method is disabled by a branch rule')
     if pull['reviewDecision'] == 'REVIEW_REQUIRED':
-        return pull, {'status': 'Awaiting human approval'}
-    if (pull['mergeable'] != 'MERGEABLE' or pull['mergeStateStatus'] != 'CLEAN'
+        return pull, awaiting_approval(args)
+    if (pull['mergeStateStatus'] != 'CLEAN'
             or pull['reviewDecision'] not in (None, 'APPROVED')):
         return pull, hold('GitHub has not confirmed required checks, reviews and merge rules')
     return pull, None
@@ -86,6 +103,10 @@ def pull_snapshot(installation, args):
 
 def positive_id(value):
     return type(value) is int and value > 0
+
+
+def awaiting_approval(args):
+    return dict(status='Awaiting human approval', pr=args.pr, head=args.reviewed_head)
 
 
 def approvals(installation, pull_path, humans, head):
@@ -147,7 +168,7 @@ def merge_reviewed(installation, args):
     if installation.permissions.get('contents') != 'write':
         return hold('App contents write permission is required')
     humans = set(args.human_logins.lower().split())
-    awaiting = dict(status='Awaiting human approval')
+    awaiting = awaiting_approval(args)
     try:
         first, blocked = pull_snapshot(installation, args)
         if blocked:
@@ -187,4 +208,5 @@ def merge_reviewed(installation, args):
             return dict(status='Merged', head=args.reviewed_head, merge_sha=merged['sha'])
     except EVIDENCE_ERRORS:
         pass
-    return hold('Merge was rejected or unconfirmed. Reconcile GitHub state before retrying.')
+    return dict(hold('Merge was rejected or unconfirmed. Reconcile GitHub state before retrying.'),
+                pr=args.pr, head=args.reviewed_head, outcome='unconfirmed')

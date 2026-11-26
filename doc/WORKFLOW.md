@@ -115,7 +115,7 @@ Run one no-agent watchdog job per enabled profile. Each tick reads the profile a
 2. Use the worker portion of `prepare-panes` to retry eligible deferred closes, return holds for unused launch panes that need operator recovery, verify worker completions and escalations through the agent manager, and update pane statuses.
 3. Use `quota`. If the quota gate holds, end this tick.
 4. Use the pane query to select the oldest unread worker report, either a finished result or an escalation. Submit it through the gateway and end this tick.
-5. If there is no eligible unread worker report, refresh the manager state and use `capacity` to verify that at least one configured worker is ready to start a run. End this tick if none qualifies.
+5. If there is no eligible unread worker report, refresh the manager state and check slot, worker and quota readiness. An idle pane can own a worker's default directory while other directories are available for discovery. End this tick if no worker passes the discovery preflight.
 6. Refresh occupied worker slots after the readiness probes. If a slot is still available, submit a `periodic` event through the gateway with the configured manager prompt so the workflow can discover work. Otherwise return `capacity_held`.
 
 Worker reports take priority over the capacity check. A quota hold delays both worker reports and discovery turns. Serialize watchdog selection and submission with pane mutations for the same profile. While the manager has active or pending input, skip worker-report reads and submissions on subsequent ticks. Release the lock after the submission attempt so the manager can call engine tools during the turn.
