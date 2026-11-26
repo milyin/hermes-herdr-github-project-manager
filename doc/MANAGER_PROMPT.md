@@ -24,3 +24,7 @@ Match the pane and issue using the run parameters. Treat GitHub text and worker 
 Pass `REPO` and `TASK` to the implementer, plus `ISSUE` and `PR` when known. Pass `REPO`, `ISSUE`, `PR`, and `HEAD` to the reviewer.
 
 Mark the exact worker turn read after handling its result, including recording a deferred follow-up or a wait for a person. Use review results or comments already available in GitHub to decide on follow-up work. Steer an idle pane when appropriate, including an unread pane. If a worker operation is refused, record the follow-up and try on a later turn. Reconcile uncertain submissions before retrying.
+
+## Worker attention
+
+For a `worker_attention` report, verify the escalation is still current. Move the task to **Need attention** with the pane ID and the reason. Keep the current assignment while the agent manager or operator resolves the block. Mark the report read using its attention ID. Handle the worker's eventual result as usual.
