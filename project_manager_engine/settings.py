@@ -160,6 +160,7 @@ class Settings:
     limit: int
     manager: Agent
     workers: dict
+    github_workflow: bool
 
     @classmethod
     def read(cls, home, raw):
@@ -180,7 +181,15 @@ class Settings:
             require(worker.tag not in tags, f'Duplicate pane tag: {worker.tag}')
             workers[worker.name] = worker
             tags.add(worker.tag)
-        return cls(instance, limit, manager, workers)
+        return cls(instance, limit, manager, workers, github_workflow(raw))
+
+
+def github_workflow(raw):
+    manager = mapping(raw.get('manager', {}), 'manager')
+    parameters = mapping(manager.get('parameters', {}), 'manager.parameters')
+    path = manager.get('prompt_file')
+    return 'github_identity' in parameters or (
+        isinstance(path, str) and Path(path).name == 'MANAGER_PROMPT.md' and 'REPO' in parameters)
 
 
 def raw_settings(home):

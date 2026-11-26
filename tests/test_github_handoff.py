@@ -57,7 +57,7 @@ class GitHubHandoff(unittest.TestCase):
             self.reviews: [[]],
             self.permission: dict(permission='write', user=HUMAN),
         }
-        mock = patch('project_manager_engine.github_handoff.subprocess.run', side_effect=self.respond)
+        mock = patch('project_manager_engine.github_app.subprocess.run', side_effect=self.respond)
         self.run = mock.start()
         self.addCleanup(mock.stop)
 
@@ -92,7 +92,7 @@ class GitHubHandoff(unittest.TestCase):
 
     def test_bot_author_outsider_and_unsubmitted_reviews_do_not_count(self):
         bot = dict(HUMAN, type='Bot')
-        outsider = dict(HUMAN, login='outsider')
+        outsider = dict(HUMAN, login='outsider', id=3)
         self.replies[self.reviews] = [[review(1, user=bot), review(2, user=AUTHOR), review(3, user=outsider),
                                       review(4, state='COMMENTED'), review(5, state='PENDING')]]
         self.expect(AWAITING_APPROVAL, [self.status, self.pull, self.reviews])
@@ -104,6 +104,11 @@ class GitHubHandoff(unittest.TestCase):
                 self.run.reset_mock()
                 self.replies[self.reviews] = [[review(1)], [newer]]
                 self.expect(AWAITING_APPROVAL, [self.status, self.pull, self.reviews])
+
+    def test_dismissal_without_login_invalidates_an_exact_head_approval(self):
+        self.replies[self.reviews] = [[review(1)], [review(2, user={'id': HUMAN['id']}, state='DISMISSED')]]
+        result = self.expect(AWAITING_APPROVAL, [self.status, self.pull, self.reviews])
+        self.assertEqual(result['reason'], 'Could not verify GitHub review evidence')
 
     def test_review_lookup_failure_and_unverifiable_evidence_keep_approval_pending(self):
         for failure in (subprocess.CalledProcessError(1, self.reviews), 'invalid json',

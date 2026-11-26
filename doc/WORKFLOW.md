@@ -14,7 +14,9 @@ Provide one implementation for each operation and use it from Hermes commands, m
 
 ## Human merge handoff
 
-The bundled GitHub workflow hands merges to a human. Its handoff operation uses fixed read commands for the PR, submitted reviews, and reviewer permissions. The general App helper has write permissions for publishing wiki updates and opening or updating pull requests. This credential setup does not enforce an approval requirement across GitHub's merge writes, so the bundled workflow provides no direct merge, auto-merge, or merge queue admission operation.
+The bundled GitHub workflow hands merges to a human. The gateway pins the manager session to the scoped project-manager toolset. The engine verifies the pinned policy and effective tools before binding the session and before submitting turns. An unverifiable or older unrestricted session holds the watchdog. The plugin also vetoes out-of-scope tool calls at dispatch, including terminal, code execution, connectors, and deferred calls outside the allowlist.
+
+The gateway host uses the App for fixed issue, PR, review and collaborator reads. The sole GitHub write exposed to the manager updates one configured Markdown page on the configured repository's wiki. A temporary bare Git repository and a revision lease constrain the update to the exact wiki revision and preserve the rest of its tree. A conflict requires a fresh read. The manager can inspect existing workers and acknowledge results. The operator starts or steers workers because delegating arbitrary tasks to App-enabled workers would reopen the write boundary.
 
 After a clean worker verdict, the manager checks for outstanding feedback and calls the handoff operation with the exact reviewed head. The operation checks the current head, reads all review pages, and looks for an active `APPROVED` review on that SHA from an operator-verified human account with current repository write access. GitHub's account type helps exclude bots. The operator's reviewer list also excludes service accounts that use ordinary GitHub logins. The PR author, comments, pending reviews, superseded or dismissed approvals, and approvals of a different SHA cannot clear **Awaiting human approval** in **Need attention**. Failed GitHub reads keep that status as well. [GitHub review history](https://docs.github.com/en/rest/pulls/reviews#list-reviews-for-a-pull-request) · [GitHub collaborator permissions](https://docs.github.com/en/rest/collaborators/collaborators#get-repository-permissions-for-a-user)
 
@@ -94,6 +96,8 @@ Run one no-agent watchdog job per enabled profile. Each tick reads the profile a
 4. Use the pane query to select the oldest unread worker report, either a finished result or an escalation. Submit it through the gateway and end this tick.
 5. If there is no unread worker report, use `capacity` to verify that at least one configured worker is ready to start a run. End this tick if none qualifies.
 6. Submit a `periodic` event through the gateway with the configured manager prompt so the workflow can discover work, then end this tick.
+
+The bundled GitHub manager observes operator-assigned workers. Its wiki and handoff checks continue with no available worker capacity and without a worker quota check.
 
 Worker reports take priority over the capacity check. A quota hold delays both worker reports and discovery turns. Serialize watchdog selection and submission with pane mutations for the same profile. While the manager has active or pending input, skip worker-report reads and submissions on subsequent ticks. Release the lock after the submission attempt so the manager can call engine tools during the turn.
 

@@ -12,11 +12,11 @@ import subprocess
 import sys
 
 from .engine import private_runtime
+from .manager_policy import DELEGATION_TOOLSET, TOOLSET, verify_github_tools
 from .settings import Hold
 
 
 ROOT = Path(__file__).resolve().parents[1]
-TOOLSET = 'project_manager'
 GROUP = 'project-manager'
 WATCHDOG_INPUT = 'herdr-project-manager-'
 
@@ -182,9 +182,10 @@ class Native:
                 async with gateway_client.connect_gateway(discovery.endpoint) as gateway:
                     if action == 'create':
                         request_id, = args
+                        policy = {'toolsets': [TOOLSET]} if self.settings.github_workflow else {}
                         return await gateway.rpc('session.create', request_id=request_id, source='tui',
                                                  cwd=self.settings.manager.cwd, model=self.settings.manager.model,
-                                                 _timeout=30)
+                                                 _timeout=30, **policy)
                     sid, *rest = args
                     if action == 'info':
                         return await gateway.rpc('session.info', session_id=sid, _timeout=10)
@@ -203,6 +204,8 @@ class Native:
                         return {}
                     if not idle_snapshot(snapshot):
                         raise Hold('manager_busy', 'The Hermes conversation has running or queued input')
+                    if self.settings is not None and self.settings.github_workflow:
+                        verify_github_tools(snapshot.get('info'))
                     message, = rest
                     submission_id = WATCHDOG_INPUT + secrets.token_hex(16)
                     submit_attempted = True
@@ -237,25 +240,35 @@ class Native:
             pane = None
         if sid is not None:
             try:
-                self.gateway('info', sid)
+                info = self.gateway('info', sid)
             except Hold as exc:
                 if exc.code not in ('not_found', 'session_not_found'):
                     raise
                 sid = None
+            else:
+                if self.settings.github_workflow:
+                    if binding.get('github_scoped') is not True:
+                        raise Hold('manager_boundary_unverified', 'The bound GitHub manager predates the scoped session')
+                    verify_github_tools(info)
         if sid is None:
             if pane is not None:
                 # Preserve an open pane on uncertain state. A connected viewer
                 # in a different conversation may be in active operator use.
                 raise Hold('manager_session_missing', 'The manager pane is still present but its Hermes conversation is gone')
             seed = [str(self.home.resolve()), workspace, binding.get('session_id'), manager.model, manager.cwd]
+            if self.settings.github_workflow:
+                seed.append(TOOLSET)
             request = 'project-manager-' + hashlib.sha256(json.dumps(seed).encode()).hexdigest()
             created = self.gateway('create', request)
             sid = created.get('session_id')
             if not isinstance(sid, str) or not sid:
                 raise Hold('manager_session_unknown', 'Hermes did not identify the manager conversation')
-            self.save_binding(dict(workspace=workspace, instance=self.settings.instance, session_id=sid))
+            if self.settings.github_workflow:
+                verify_github_tools(self.gateway('info', sid))
+            self.save_binding(dict(workspace=workspace, instance=self.settings.instance, session_id=sid,
+                                   github_scoped=self.settings.github_workflow))
         elif binding.get('workspace') != workspace:
-            self.save_binding(dict(workspace=workspace, instance=self.settings.instance, session_id=sid))
+            self.save_binding(dict(binding, workspace=workspace, instance=self.settings.instance))
         if pane is not None:
             if not binding.get('pane_id'):
                 self.remember_terminal(workspace, sid, pane)
@@ -272,6 +285,7 @@ class Native:
 
     def remember_terminal(self, workspace, sid, pane):
         self.save_binding(dict(workspace=workspace, session_id=sid, instance=self.settings.instance,
+                               github_scoped=self.settings.github_workflow,
                                pane_id=pane['pane_id'], terminal_id=pane.get('terminal_id')))
 
     def manager_exited(self, workspace, pane):
@@ -300,10 +314,14 @@ class Native:
         model = info.get('model') or applied.get('model')
         if cwd != self.settings.manager.cwd or model != self.settings.manager.model.rsplit(':', 1)[-1]:
             raise Hold('manager_policy_mismatch', 'Manager conversation model or working directory does not match the profile')
-        tools = {name for names in (info.get('tools') or {}).values() for name in names}
-        deferred = TOOLSET in (info.get('enabled_toolsets') or ()) and {'tool_search', 'tool_call'} <= tools
-        if 'project_manager_run' not in tools and not deferred:
-            raise Hold('manager_tools_unavailable', 'The bound manager conversation has no project-manager toolset')
+        if self.settings.github_workflow:
+            verify_github_tools(info)
+        else:
+            tools = {name for names in (info.get('tools') or {}).values() for name in names}
+            enabled = info.get('enabled_toolsets') or ()
+            deferred = {TOOLSET, DELEGATION_TOOLSET} <= set(enabled) and {'tool_search', 'tool_call'} <= tools
+            if 'project_manager_run' not in tools and not deferred:
+                raise Hold('manager_tools_unavailable', 'The bound manager conversation has no delegation toolset')
         pending = snapshot.get('pending')
         state = ('blocked' if snapshot.get('prompts') or snapshot.get('open_requests') else
                  'idle' if idle_snapshot(snapshot) else 'working')
